@@ -1,0 +1,16 @@
+{
+  "name": "player-ticia",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.0",
+    "express": "^4.19.2",
+    "mime": "^3.0.0",
+    "multer": "^1.4.5-lts.2",
+    "nanoid": "^5.0.7"
+  }
+}

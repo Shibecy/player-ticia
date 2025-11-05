@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Upload em Lote</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+  <style>
+    .drop { border:2px dashed #2b3342; border-radius:16px; padding:24px; text-align:center; }
+    .muted { color:#8a94a6; font-size:12px; }
+    ul { list-style:none; padding:0; }
+    li { padding:6px 0; border-bottom:1px solid #202530; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Upload em Lote</h1>
+    <div class="drop" id="drop">
+      Arraste seus arquivos aqui ou
+      <input type="file" id="files" name="files" accept="audio/*" multiple />
+      <div class="muted">Formato do nome: <code>Artista - Música.ext</code></div>
+    </div>
+    <button id="send">Enviar</button>
+    <h3>Arquivos selecionados</h3>
+    <ul id="list"></ul>
+    <pre id="out"></pre>
+  </main>
+
+  <script>
+    const filesInput = document.getElementById('files');
+    const drop = document.getElementById('drop');
+    const list = document.getElementById('list');
+    const out = document.getElementById('out');
+    const sendBtn = document.getElementById('send');
+    let queue = [];
+
+    function render() {
+      list.innerHTML = '';
+      queue.forEach(f => {
+        const li = document.createElement('li');
+        li.textContent = f.name;
+        list.appendChild(li);
+      });
+    }
+
+    filesInput.addEventListener('change', () => {
+      queue = Array.from(filesInput.files || []);
+      render();
+    });
+
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.opacity = 0.8; });
+    drop.addEventListener('dragleave', e => { drop.style.opacity = 1; });
+    drop.addEventListener('drop', e => {
+      e.preventDefault(); drop.style.opacity = 1;
+      const files = Array.from(e.dataTransfer.files || []);
+      queue = queue.concat(files);
+      render();
+    });
+
+    sendBtn.addEventListener('click', async () => {
+      if (!queue.length) return alert('Selecione arquivos');
+      const fd = new FormData();
+      queue.forEach(f => fd.append('files', f));
+      const r = await fetch('/api/upload/batch', { method: 'POST', body: fd });
+      const j = await r.json();
+      out.textContent = JSON.stringify(j, null, 2);
+      queue = [];
+      filesInput.value = '';
+      render();
+    });
+  </script>
+</body>
+</html>

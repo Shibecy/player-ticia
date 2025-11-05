@@ -1,0 +1,8 @@
+music/
+data/
+certbot/
+node_modules/
+*.mp3
+*.db
+.git/
+.DS_Store

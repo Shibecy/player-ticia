@@ -1,0 +1,535 @@
+import express from 'express';
+import multer from 'multer';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
+import path from 'path';
+import fs from 'fs';
+import mime from 'mime';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const DEFAULT_STORE = process.env.STORE_ID || 'default';
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+/* ================== SCHEMA ================== */
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id, store_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}'
+);
+`);
+try { db.exec(`ALTER TABLE events ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+try { db.exec(`ALTER TABLE sessions ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+
+function migrateLikesUniqueTriplet() {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(likes)`).all();
+    const hasStore = cols.some(c => c.name === 'store_id');
+    const idxs = db.prepare(`PRAGMA index_list(likes)`).all();
+    let hasTriplet = false;
+    for (const idx of idxs) {
+      if (!idx.unique) continue;
+      const info = db.prepare(`PRAGMA index_info(${idx.name})`).all();
+      if (info.map(r=>r.name).join(',') === 'track_id,client_id,store_id') { hasTriplet = true; break; }
+    }
+    if (!hasStore || !hasTriplet) {
+      db.exec('BEGIN');
+      db.exec(`
+        CREATE TABLE likes_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          track_id TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          is_like INTEGER NOT NULL,
+          store_id TEXT DEFAULT '${DEFAULT_STORE}',
+          created_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(track_id, client_id, store_id)
+        );
+      `);
+      if (hasStore) {
+        db.exec(`INSERT OR IGNORE INTO likes_new (track_id, client_id, is_like, store_id, created_at)
+                 SELECT track_id, client_id, is_like, COALESCE(store_id,'${DEFAULT_STORE}'), created_at FROM likes;`);
+      } else {
+        db.exec(`INSERT OR IGNORE INTO likes_new (track_id, client_id, is_like, store_id, created_at)
+                 SELECT track_id, client_id, is_like, '${DEFAULT_STORE}', created_at FROM likes;`);
+      }
+      db.exec(`DROP TABLE likes;`);
+      db.exec(`ALTER TABLE likes_new RENAME TO likes;`);
+      db.exec('COMMIT');
+      console.log('[migrate] likes UNIQUE(track_id,client_id,store_id) aplicada');
+    }
+  } catch (e) { try { db.exec('ROLLBACK'); } catch {}; console.error('[migrate] likes', e); }
+}
+migrateLikesUniqueTriplet();
+
+/* ================== PREPARED ================== */
+const stmtInsertTrack = db.prepare(`INSERT INTO tracks (id, filename, artist, title) VALUES (@id, @filename, @artist, @title)`);
+const stmtAllTracks   = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`);
+const stmtFindTrack   = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike  = db.prepare(`INSERT INTO likes (track_id, client_id, is_like, store_id) VALUES (?, ?, ?, ?)
+  ON CONFLICT(track_id, client_id, store_id) DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec, store_id) VALUES (?, ?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time, store_id) VALUES (?, ?, datetime('now'), ?)`);
+const stmtCloseSession= db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND store_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+/* ================== MIDDLEWARES ================== */
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+/* ---- Basic Auth GLOBAL para rotas admin ---- */
+function adminAuth(req, res, next){
+  const u = process.env.ADMIN_USER || 'admin';
+  const p = process.env.ADMIN_PASS || 'changeme';
+  const h = req.headers['authorization'] || '';
+  if (!h.startsWith('Basic ')) { res.set('WWW-Authenticate','Basic realm="Admin"'); return res.status(401).send('Auth required'); }
+  const [user, pass] = Buffer.from(h.slice(6), 'base64').toString().split(':');
+  if (user===u && pass===p) return next();
+  res.set('WWW-Authenticate','Basic realm="Admin"');
+  return res.status(401).send('Unauthorized');
+}
+const ADMIN_PATHS = ['/admin','/api/stores','/api/report/daily','/api/now-playing','/api/report/csv'];
+app.use((req,res,next)=>{
+  if (ADMIN_PATHS.some(p => req.path === p || req.path.startsWith(p))) return adminAuth(req,res,next);
+  next();
+});
+
+/* Static (fica aberto) */
+app.use('/public', express.static('public'));
+
+/* ================== HELPERS ================== */
+function stripExt(n){ return n.replace(/\.[^./\\]+$/,''); }
+function parseArtistTitleFromFilename(filename){
+  const base = stripExt(filename).trim();
+  let artist = '', title = base;
+  const parts = base.split(' - ');
+  if (parts.length >= 2) { artist = parts.shift().trim(); title = parts.join(' - ').trim(); }
+  else { const i = base.indexOf('-'); if (i > 0) { artist = base.slice(0,i).trim(); title = base.slice(i+1).trim(); } }
+  return { artist, title };
+}
+function getStoreId(req){ return (req.query.storeId || req.body?.storeId || req.headers['x-store-id'] || DEFAULT_STORE).toString(); }
+
+/* ================== ROTAS ================== */
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+app.get('/admin', (_, res) => res.sendFile(path.resolve('public/admin.html')));
+
+app.get('/api/tracks', (req, res) => {
+  const list = stmtAllTracks.all().map(t => {
+    let artist = t.artist, title = t.title;
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(t.filename);
+      artist = artist || d.artist || 'Artista';
+      title  = title  || d.title  || t.filename;
+    }
+    return { id: t.id, artist, title, url: `/audio/${t.id}` };
+  });
+  res.json(list);
+});
+
+app.get('/audio/:trackId', (req, res) => {
+  const t = stmtFindTrack.get(req.params.trackId);
+  if (!t) return res.status(404).send('Track not found');
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+  const stat = fs.statSync(filePath), size = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+  if (range) {
+    const [s,e] = range.replace(/bytes=/,'').split('-');
+    const start = parseInt(s,10);
+    const end = e ? parseInt(e,10) : size-1;
+    res.writeHead(206, {'Content-Range':`bytes ${start}-${end}/${size}`,'Accept-Ranges':'bytes','Content-Length':(end-start)+1,'Content-Type':contentType});
+    fs.createReadStream(filePath,{start,end}).pipe(res);
+  } else {
+    res.writeHead(200, {'Content-Length':size,'Content-Type':contentType});
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+const upload = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.get('/upload', (_, res) => res.sendFile(path.resolve('public/upload.html')));
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error:'Nenhum arquivo' });
+    const { originalname, path: tmpPath } = req.file;
+    let { artist='', title='' } = req.body || {};
+    if (!artist || !title) { const d = parseArtistTitleFromFilename(originalname); artist = artist||d.artist; title = title||d.title; }
+    const id = nanoid(12);
+    artist = sanitize(artist);
+    title = sanitize(title);
+    const safe = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g,'_')}`;
+    fs.renameSync(tmpPath, path.join(MUSIC_DIR, safe));
+    stmtInsertTrack.run({ id, filename:safe, artist, title });
+    res.json({ ok:true, id, artist, title });
+  } catch(e){ console.error(e); res.status(500).json({ error:'Falha no upload' }); }
+});
+
+app.get('/upload-batch', (_, res) => res.sendFile(path.resolve('public/upload-batch.html')));
+const uploadMany = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.post('/api/upload/batch', uploadMany.array('files', 100), (req, res) => {
+  try {
+    const out = [];
+    for (const f of (req.files||[])) {
+      const id = nanoid(12);
+      const meta = parseArtistTitleFromFilename(f.originalname);
+      meta.artist = sanitize(meta.artist);
+      meta.title  = sanitize(meta.title);
+      const safe = `${id}-${f.originalname.replace(/[^a-zA-Z0-9_. -]+/g,'_')}`;
+      fs.renameSync(f.path, path.join(MUSIC_DIR, safe));
+      stmtInsertTrack.run({ id, filename:safe, artist:meta.artist, title:meta.title });
+      out.push({ id, artist:meta.artist, title:meta.title, filename:safe });
+    }
+    res.json({ ok:true, count:out.length, items:out });
+  } catch(e){ console.error(e); res.status(500).json({ error:'Falha no upload em lote' }); }
+});
+
+app.get('/api/like/state', (req, res) => {
+  const { trackId, clientId } = req.query || {};
+  const storeId = getStoreId(req);
+  if (!trackId || !clientId) return res.status(400).json({ error:'Parâmetros inválidos' });
+  const row = db.prepare(`SELECT is_like FROM likes WHERE track_id=? AND client_id=? AND store_id=?`).get(trackId, clientId, storeId);
+  const state = row == null ? null : (row.is_like ? 'like' : 'dislike');
+  res.json({ state });
+});
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  const storeId = getStoreId(req);
+  if (!trackId || !clientId || typeof like !== 'boolean') return res.status(400).json({ error:'Parâmetros inválidos' });
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0, storeId);
+  res.json({ ok:true, state: like ? 'like' : 'dislike' });
+});
+
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  const storeId = getStoreId(req);
+  if (!clientId || !type) return res.status(400).json({ error:'Parâmetros inválidos' });
+  const day = new Date().toISOString().slice(0,10);
+
+  if (type === 'play') {
+    const c = db.prepare(`SELECT COUNT(*) c FROM events WHERE client_id=? AND store_id=? AND event_type IN ('play','resume') AND DATE(created_at)=DATE('now')`).get(clientId, storeId).c;
+    if (c === 0) stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0, storeId);
+  }
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (!open) stmtOpenSession.run(clientId, day, storeId);
+  }
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (open) stmtCloseSession.run(open.id);
+  }
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0, storeId);
+  res.json({ ok:true });
+});
+
+function computeTotalsWithLive(date, storeId) {
+  const sessions = db.prepare(`SELECT start_time, end_time FROM sessions WHERE DATE(start_time)=DATE(?) AND store_id=?`).all(date, storeId);
+  let total = 0;
+  for (const s of sessions) {
+    const start = new Date(s.start_time);
+    const end   = s.end_time ? new Date(s.end_time) : new Date();
+    total += Math.max(0, (end - start)/1000);
+  }
+  const evs = db.prepare(`SELECT event_type type, COUNT(*) c FROM events WHERE DATE(created_at)=DATE(?) AND store_id=? GROUP BY event_type`).all(date, storeId);
+  const eventsMap = evs.reduce((m,r)=> (m[r.type]=r.c, m), {});
+  const first = db.prepare(`SELECT start_time FROM sessions WHERE DATE(start_time)=DATE(?) AND store_id=? ORDER BY start_time ASC LIMIT 1`).get(date, storeId);
+  return { totalSecondsPlayed: Math.round(total), events: eventsMap, dayStart: first?.start_time || null };
+}
+
+app.get('/api/report/daily', (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const storeId = getStoreId(req);
+  const totals = computeTotalsWithLive(date, storeId);
+  const likes = db.prepare(`
+    SELECT t.id, t.artist, t.title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id AND l.store_id = ?
+    GROUP BY t.id
+    ORDER BY likes DESC`).all(storeId);
+  res.json({ date, storeId, totals, tracks: likes });
+});
+
+app.get('/api/report/csv', (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const storeId = getStoreId(req);
+  const rows = db.prepare(`
+    SELECT t.id track_id, COALESCE(t.artist,'') artist, COALESCE(t.title,'') title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id AND l.store_id = ?
+    GROUP BY t.id
+    ORDER BY likes DESC, dislikes ASC`).all(storeId);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="report_${storeId}_${date}.csv"`);
+  res.write('track_id,artist,title,likes,dislikes\n');
+  for (const r of rows) {
+    const esc = s => `"${String(s??'').replace(/"/g,'""')}"`;
+    res.write([r.track_id, esc(r.artist), esc(r.title), r.likes||0, r.dislikes||0].join(',')+'\n');
+  }
+  res.end();
+});
+
+app.listen(PORT, () => console.log(`Player TI&CIA rodando na porta ${PORT}`));
+
+// --- UI: página de upload em lote (GET /upload/batch)
+app.get('/upload/batch', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Upload em Lote · TI&CIA Player</title>
+  <style>
+    body { font-family: sans-serif; margin: 40px; }
+    .card { max-width: 560px; border: 1px solid #ddd; border-radius: 12px; padding: 20px; }
+    h1 { margin: 0 0 12px; font-weight: 600; }
+    .hint { color: #666; font-size: 14px; margin-bottom: 16px; }
+    .row { margin: 10px 0; }
+    button { padding: 10px 16px; border: 0; border-radius: 8px; cursor: pointer; }
+    .primary { background:#111; color:#fff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Upload em Lote</h1>
+    <div class="hint">Use a convenção <strong>Artista - Música.mp3</strong>. O sistema sanitiza nomes automaticamente.</div>
+    <form action="/api/upload/batch" method="post" enctype="multipart/form-data">
+      <div class="row">
+        <input type="file" name="files" multiple required />
+      </div>
+      <div class="row">
+        <label>Loja (opcional): </label>
+        <select name="storeId">
+          <option value="">default</option>
+          <option value="itaipu">itaipu</option>
+          <option value="rio">rio</option>
+          <option value="macae">macae</option>
+        </select>
+      </div>
+      <div class="row">
+        <button class="primary" type="submit">Enviar arquivos</button>
+      </div>
+    </form>
+    <div class="hint">Endpoint usado: <code>POST /api/upload/batch</code> (campo <code>files</code>)</div>
+  </div>
+</body>
+</html>
+  `);
+});
+
+// --- Admin API: listar faixas (JSON)
+app.get('/api/admin/tracks', adminAuth, (req, res) => {
+  const store = (req.query.store || '').trim();
+  const q = (req.query.q || '').trim();
+  const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+  const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+
+  const where = [];
+  const params = [];
+
+  if (store) { where.push('store = ?'); params.push(store); }
+  if (q) {
+    where.push('(COALESCE(artist,"") LIKE ? OR COALESCE(title,"") LIKE ? OR COALESCE(filename,"") LIKE ?)');
+    const like = `%${q}%`;
+    params.push(like, like, like);
+  }
+  const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+  const total = db.prepare(`SELECT COUNT(*) AS c FROM tracks ${whereSql}`).get(...params).c;
+  const rows = db.prepare(
+    `SELECT id, artist, title, store, filename
+     FROM tracks ${whereSql}
+     ORDER BY id DESC
+     LIMIT ? OFFSET ?`
+  ).all(...params, limit, offset);
+
+  res.json({ ok: true, total, limit, offset, items: rows });
+});
+
+// --- Admin API: exportar faixas (CSV)
+app.get('/api/admin/tracks.csv', adminAuth, (req, res) => {
+  const store = (req.query.store || '').trim();
+  const q = (req.query.q || '').trim();
+
+  const where = [];
+  const params = [];
+  if (store) { where.push('store = ?'); params.push(store); }
+  if (q) {
+    where.push('(COALESCE(artist,"") LIKE ? OR COALESCE(title,"") LIKE ? OR COALESCE(filename,"") LIKE ?)');
+    const like = `%${q}%`;
+    params.push(like, like, like);
+  }
+  const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+  const rows = db.prepare(
+    `SELECT id, artist, title, store, filename
+     FROM tracks ${whereSql}
+     ORDER BY id DESC`
+  ).all(...params);
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="tracks.csv"');
+
+  const header = 'id,artist,title,store,filename\n';
+  const body = rows.map(r => {
+    const esc = v => {
+      const s = (v ?? '').toString().replace(/"/g, '""');
+      return `"${s}"`;
+    };
+    return [esc(r.id), esc(r.artist), esc(r.title), esc(r.store), esc(r.filename)].join(',');
+  }).join('\n');
+
+  res.end(header + body + '\n');
+});
+
+// --- Admin UI: lista de faixas
+app.get('/admin/tracks', adminAuth, (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Admin · Tracks</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; margin:24px;}
+  .row{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px}
+  input,select,button{padding:8px 10px; border:1px solid #ddd; border-radius:8px}
+  table{border-collapse:collapse; width:100%; margin-top:8px}
+  th,td{border:1px solid #eee; padding:8px; text-align:left; font-size:14px}
+  th{background:#fafafa}
+  .badge{font-size:12px; background:#eef; border:1px solid #cde; padding:2px 6px; border-radius:6px}
+  .muted{color:#666}
+</style>
+</head>
+<body>
+  <h1>Faixas cadastradas</h1>
+  <div class="row">
+    <label>Loja:</label>
+    <select id="store">
+      <option value="">(todas)</option>
+      <option value="default">default</option>
+      <option value="itaipu">itaipu</option>
+      <option value="rio">rio</option>
+      <option value="macae">macae</option>
+    </select>
+    <input id="q" placeholder="buscar por artista, título ou arquivo" />
+    <button id="search">Buscar</button>
+    <button id="csv">Exportar CSV</button>
+    <span id="total" class="muted"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:80px">ID</th>
+        <th>Artista</th>
+        <th>Música</th>
+        <th style="width:120px">Loja</th>
+        <th>Arquivo</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <div class="row">
+    <button id="prev">◀ Anterior</button>
+    <span id="pageInfo" class="muted">página 1</span>
+    <button id="next">Próxima ▶</button>
+  </div>
+
+<script>
+let limit = 50, offset = 0, total = 0;
+
+function buildQuery(extra={}) {
+  const store = document.getElementById('store').value.trim();
+  const q = document.getElementById('q').value.trim();
+  const p = new URLSearchParams();
+  if (store) p.set('store', store);
+  if (q) p.set('q', q);
+  p.set('limit', String(limit));
+  p.set('offset', String(offset));
+  for (const [k,v] of Object.entries(extra)) p.set(k, v);
+  return p.toString();
+}
+
+async function load() {
+  const qs = buildQuery();
+  const resp = await fetch('/api/admin/tracks?' + qs, { credentials: 'include' });
+  if (!resp.ok) { alert('Falha ao carregar: ' + resp.status); return; }
+  const js = await resp.json();
+  total = js.total || 0;
+
+  document.getElementById('total').textContent = total + ' registro(s)';
+  document.getElementById('pageInfo').textContent =
+    'página ' + (Math.floor(offset/limit)+1) + ' de ' + (Math.max(1, Math.ceil(total/limit)));
+
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = '';
+  (js.items || []).forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>'+r.id+'</td>'
+      + '<td>'+(r.artist||'')+'</td>'
+      + '<td>'+(r.title||'')+'</td>'
+      + '<td><span class="badge">'+(r.store||'')+'</span></td>'
+      + '<td><span class="muted">'+(r.filename||'')+'</span></td>';
+    tb.appendChild(tr);
+  });
+}
+
+document.getElementById('search').onclick = () => { offset = 0; load(); };
+document.getElementById('csv').onclick = () => {
+  const qs = buildQuery();
+  window.location.href = '/api/admin/tracks.csv?' + qs;
+};
+document.getElementById('prev').onclick = () => { offset = Math.max(0, offset - limit); load(); };
+document.getElementById('next').onclick = () => {
+  if (offset + limit < total) { offset += limit; load(); }
+};
+
+load();
+</script>
+</body>
+</html>
+  `);
+});

@@ -1,0 +1,13 @@
+services:
+  player:
+    build: .
+    container_name: player-ticia
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./music:/usr/src/app/music
+      - ./data:/usr/src/app/data
+      - ./public:/usr/src/app/public
+    environment:
+      - NODE_ENV=production
+      - PORT=8080

@@ -1,0 +1,17 @@
+services:
+  player:
+    build: .
+    container_name: player-ticia
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - ADMIN_USER=admin
+      - ADMIN_PASS=SenhaFORTE101
+    volumes:
+      - ./music:/usr/src/app/music
+      - ./data:/usr/src/app/data
+      - ./public:/usr/src/app/public
+    restart: always
+

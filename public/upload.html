@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Upload de Músicas</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Upload de Músicas</h1>
+    <form id="f">
+      <input type="file" name="file" accept="audio/*" required />
+      <input type="text" name="artist" placeholder="Artista" />
+      <input type="text" name="title" placeholder="Título" />
+      <button>Enviar</button>
+    </form>
+    <pre id="out"></pre>
+  </main>
+  <script>
+    const f = document.getElementById('f');
+    const out = document.getElementById('out');
+    f.onsubmit = async (e)=>{
+      e.preventDefault();
+      const fd = new FormData(f);
+      const r = await fetch('/api/upload',{ method:'POST', body: fd });
+      out.textContent = JSON.stringify(await r.json(), null, 2);
+      f.reset();
+    };
+  </script>
+</body>
+</html>

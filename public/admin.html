@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dashboard • TI&CIA Player</title>
+<link rel="stylesheet" href="/public/styles.css" />
+<style>
+  .grid{ display:grid; gap:16px; grid-template-columns: repeat(12, 1fr); }
+  .card{ background:var(--card); border-radius:16px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+  .store{ grid-column: span 6; }
+  .row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
+  .row input, .row button{ background:#222835; color:#e8eefb; border:1px solid #2b3342; padding:8px 12px; border-radius:10px; }
+  .muted{ color:var(--muted); font-size:12px; }
+  .kv{ display:grid; grid-template-columns: 180px 1fr; gap:8px; margin-top:8px; }
+  .kv div:nth-child(odd){ color:var(--muted); }
+  .title-line{ display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .btn{ background:#222835; color:#e8eefb; border:1px solid #2b3342; padding:6px 10px; border-radius:10px; cursor:pointer; }
+  .btn:hover{ border-color:var(--accent); }
+</style>
+</head>
+<body>
+  <header class="header">
+    <img src="http://tiecia.com.br/player/logo.png" alt="TI&CIA" class="logo" />
+  </header>
+
+  <main class="container">
+    <div class="row">
+      <label>Data: <input type="date" id="date"></label>
+      <button id="btnReload" class="btn">Atualizar</button>
+      <label class="muted"><input type="checkbox" id="autorefresh" /> Auto-refresh (30s)</label>
+      <span class="muted" id="status"></span>
+    </div>
+
+    <section id="stores" class="grid"></section>
+  </main>
+
+<script>
+const dateEl = document.getElementById('date');
+const statusEl = document.getElementById('status');
+const autorefresh = document.getElementById('autorefresh');
+const storesEl = document.getElementById('stores');
+document.getElementById('btnReload').addEventListener('click', loadAll);
+
+dateEl.value = new Date().toISOString().slice(0,10);
+
+function fmtHMS(total){
+  total = Math.max(0, Math.floor(total||0));
+  const h = Math.floor(total/3600);
+  const m = Math.floor((total%3600)/60);
+  const s = total%60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+async function fetchJSON(url){
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}
+
+async function loadStoreCard(storeId){
+  const date = dateEl.value;
+  const [rep, now] = await Promise.all([
+    fetchJSON(`/api/report/daily?date=${date}&storeId=${encodeURIComponent(storeId)}`),
+    fetchJSON(`/api/now-playing?storeId=${encodeURIComponent(storeId)}`)
+  ]);
+  const time = fmtHMS(rep.totals?.totalSecondsPlayed||0);
+  const start = rep.totals?.dayStart ? new Date(rep.totals.dayStart).toLocaleTimeString() : '—';
+  const np = now.nowPlaying ? `${now.nowPlaying.artist || '-'} – ${now.nowPlaying.title || '-'}` : '—';
+  return { storeId, time, start, nowPlaying: np, date };
+}
+
+function renderStoreCard({storeId, time, start, nowPlaying, date}){
+  const id = `store-${storeId}`;
+  let el = document.getElementById(id);
+  if (!el){
+    el = document.createElement('div');
+    el.className = 'card store';
+    el.id = id;
+    storesEl.appendChild(el);
+  }
+  el.innerHTML = `
+    <div class="title-line">
+      <h2 style="margin:0">${storeId}</h2>
+      <div>
+        <a class="btn" href="/api/report/csv?date=${encodeURIComponent(date)}&storeId=${encodeURIComponent(storeId)}">Exportar CSV</a>
+      </div>
+    </div>
+    <div class="kv">
+      <div>Tempo de execução (ao vivo)</div><div>${time}</div>
+      <div>Começou hoje às</div><div>${start}</div>
+      <div>Música atual</div><div>${nowPlaying}</div>
+    </div>
+  `;
+}
+
+async function loadAll(){
+  statusEl.textContent = 'carregando…';
+  try{
+    const stores = (await fetchJSON('/api/stores')).stores || [];
+    if (!stores.length){ storesEl.innerHTML = '<div class="muted">Nenhuma loja registrada ainda.</div>'; }
+    for (const s of stores){
+      try{
+        const data = await loadStoreCard(s);
+        renderStoreCard(data);
+      }catch(e){
+        console.error('Erro ao carregar loja', s, e);
+      }
+    }
+    statusEl.textContent = 'atualizado: ' + new Date().toLocaleTimeString();
+  }catch(e){
+    statusEl.textContent = 'erro ao carregar';
+    console.error(e);
+  }
+}
+
+let iv=null;
+autorefresh.addEventListener('change', ()=>{
+  if (autorefresh.checked){ iv = setInterval(loadAll, 30000); }
+  else { clearInterval(iv); iv=null; }
+});
+
+loadAll();
+</script>
+</body>
+</html>

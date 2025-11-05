@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dashboard • TI&CIA Player</title>
+<link rel="stylesheet" href="/public/styles.css" />
+<style>
+  .grid{ display:grid; gap:16px; grid-template-columns: repeat(12, 1fr); }
+  .card{ background:var(--card); border-radius:16px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+  .kpi{ grid-column: span 3; }
+  .kpi h3{ margin:0; font-size:12px; color:var(--muted); }
+  .kpi .v{ font-size:28px; margin-top:6px; }
+  .row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
+  .row input, .row select, .row button{ background:#222835; color:#e8eefb; border:1px solid #2b3342; padding:8px 12px; border-radius:10px; }
+  table{ width:100%; border-collapse:collapse; }
+  th, td{ padding:10px 12px; border-bottom:1px solid #202530; text-align:left; }
+  th{ color:var(--muted); font-weight:600; }
+  .muted{ color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+  <header class="header">
+    <img src="http://tiecia.com.br/player/logo.png" alt="TI&CIA" class="logo" />
+  </header>
+
+  <main class="container">
+    <div class="row">
+      <label>Data:
+        <input type="date" id="date">
+      </label>
+      <button id="btnReload">Atualizar</button>
+      <label class="muted"><input type="checkbox" id="autorefresh" /> Auto-refresh (30s)</label>
+      <span class="muted" id="status"></span>
+    </div>
+
+    <section class="grid">
+      <div class="card kpi">
+        <h3>Tempo tocado</h3>
+        <div class="v" id="kpi-time">–</div>
+        <div class="muted" id="kpi-seconds"> </div>
+      </div>
+      <div class="card kpi">
+        <h3>Plays/Resumes</h3>
+        <div class="v" id="kpi-plays">–</div>
+      </div>
+      <div class="card kpi">
+        <h3>Pauses</h3>
+        <div class="v" id="kpi-pauses">–</div>
+      </div>
+      <div class="card kpi">
+        <h3>Primeiros plays do dia</h3>
+        <div class="v" id="kpi-first">–</div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2 style="margin:0 0 8px 0;">Top faixas (por 👍)</h2>
+      <table id="tbl">
+        <thead>
+          <tr><th>#</th><th>Artista</th><th>Música</th><th>👍</th><th>👎</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="muted" id="empty" style="display:none;">Sem dados para o dia selecionado.</div>
+    </section>
+  </main>
+
+<script>
+const statusEl = document.getElementById('status');
+const dateEl = document.getElementById('date');
+const btnReload = document.getElementById('btnReload');
+const autorefresh = document.getElementById('autorefresh');
+
+function fmtHMS(total){
+  total = Math.max(0, Math.floor(total||0));
+  const h = Math.floor(total/3600);
+  const m = Math.floor((total%3600)/60);
+  const s = total%60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+async function load(){
+  const d = dateEl.value || new Date().toISOString().slice(0,10);
+  const url = `/api/report/daily?date=${d}`;
+  statusEl.textContent = 'carregando…';
+  try {
+    const r = await fetch(url);
+    const j = await r.json();
+    statusEl.textContent = `atualizado: ${new Date().toLocaleTimeString()}`;
+    // KPIs
+    const totals = j.totals || {};
+    const ev = totals.events || {};
+    document.getElementById('kpi-time').textContent = fmtHMS(totals.totalSecondsPlayed||0);
+    document.getElementById('kpi-seconds').textContent = (totals.totalSecondsPlayed||0) + ' s';
+    const plays = (ev.play||0) + (ev.resume||0);
+    document.getElementById('kpi-plays').textContent = plays;
+    document.getElementById('kpi-pauses').textContent = ev.pause||0;
+    document.getElementById('kpi-first').textContent = ev.first_play_of_day||0;
+    // tabela
+    const tbody = document.querySelector('#tbl tbody');
+    tbody.innerHTML = '';
+    const rows = (j.tracks||[]).slice().sort((a,b)=>(b.likes||0)-(a.likes||0));
+    document.getElementById('empty').style.display = rows.length? 'none':'block';
+    rows.forEach((t,i)=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${i+1}</td><td>${t.artist||'-'}</td><td>${t.title||'-'}</td><td>${t.likes||0}</td><td>${t.dislikes||0}</td>`;
+      tbody.appendChild(tr);
+    });
+  } catch(e){
+    statusEl.textContent = 'erro ao carregar';
+    console.error(e);
+  }
+}
+
+btnReload.addEventListener('click', load);
+dateEl.value = new Date().toISOString().slice(0,10);
+load();
+
+let iv=null;
+autorefresh.addEventListener('change', ()=>{
+  if (autorefresh.checked){
+    iv = setInterval(load, 30000);
+  } else {
+    clearInterval(iv); iv=null;
+  }
+});
+</script>
+</body>
+</html>

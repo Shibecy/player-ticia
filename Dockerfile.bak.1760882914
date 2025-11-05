@@ -1,0 +1,27 @@
+FROM node:20-bookworm-slim
+WORKDIR /usr/src/app
+
+# 1) libs básicas para baixar binários com TLS ok
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# 2) copiar manifestos
+COPY package.json ./
+
+# 3) tentar instalar SEM compilar (usa prebuild do better-sqlite3 quando disponível)
+ENV npm_config_build_from_source=false
+RUN npm install --omit=dev || true
+
+# 4) se a etapa acima não instalou o better-sqlite3 corretamente, compilar:
+#    (python, make, g++)
+RUN node -e "try{require('better-sqlite3');process.exit(0)}catch(e){process.exit(1)}" \
+  || (apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+      && npm rebuild better-sqlite3 --build-from-source \
+      && apt-get purge -y python3 make g++ && apt-get autoremove -y \
+      && rm -rf /var/lib/apt/lists/*)
+
+# 5) copiar o restante do projeto
+COPY . .
+
+EXPOSE 8080
+CMD ["node", "server.js"]

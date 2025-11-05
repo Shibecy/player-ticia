@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Player TI&CIA</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <header class="header">
+    <img src="http://tiecia.com.br/player/logo.png" alt="TI&CIA" class="logo" />
+  </header>
+
+  <main class="container">
+    <section class="now-playing">
+      <div id="track-meta">
+        <div class="artist" id="artist">–</div>
+        <div class="title" id="title">Selecione uma faixa</div>
+      </div>
+      <div class="controls">
+        <button id="btn-play"   class="btn">▶︎</button>
+        <button id="btn-pause"  class="btn">⏸</button>
+        <button id="btn-next"   class="btn">⏭</button>
+        <button id="btn-like"   class="btn">👍</button>
+        <button id="btn-dislike" class="btn">👎</button>
+      </div>
+      <div class="progress">
+        <span id="elapsed">0:00</span>
+        <input type="range" id="seek" min="0" max="100" value="0" />
+        <span id="duration">0:00</span>
+      </div>
+    </section>
+  </main>
+
+  <audio id="audio"></audio>
+  <script src="/public/app.js"></script>
+</body>
+</html>

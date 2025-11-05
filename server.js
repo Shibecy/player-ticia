@@ -1,0 +1,1056 @@
+import express from 'express';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
+import path from 'path';
+import fs from 'fs';
+import mime from 'mime';
+import { fileURLToPath } from 'url';
+import cookieParser from 'cookie-parser';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = Number(process.env.PORT) || 8080;
+const DEFAULT_STORE = process.env.STORE_ID || 'default';
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+// Criar diretórios
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+/* ================== SCHEMA ================== */
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL UNIQUE,
+  artist TEXT,
+  title TEXT,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  store_id TEXT NOT NULL DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id, store_id)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  store_id TEXT NOT NULL DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT,
+  store_id TEXT NOT NULL DEFAULT '${DEFAULT_STORE}'
+);
+
+CREATE TABLE IF NOT EXISTS heartbeats (
+  store_id TEXT PRIMARY KEY,
+  last_seen TEXT DEFAULT (datetime('now')),
+  state TEXT,
+  track_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS playtime_daily (
+  store_id TEXT,
+  day TEXT,
+  seconds_played INTEGER DEFAULT 0,
+  last_state TEXT,
+  last_ts TEXT,
+  PRIMARY KEY (store_id, day)
+);
+`);
+
+// Migrações (adicionar colunas se não existirem)
+try { db.exec(`ALTER TABLE tracks ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+try { db.exec(`ALTER TABLE events ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+try { db.exec(`ALTER TABLE sessions ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+
+/* ================== PREPARED STATEMENTS ================== */
+const stmtInsertTrack = db.prepare(`INSERT OR IGNORE INTO tracks (id, filename, artist, title, store_id) VALUES (@id, @filename, @artist, @title, @storeId)`);
+const stmtFindTrack = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike = db.prepare(`
+  INSERT INTO likes (track_id, client_id, is_like, store_id) 
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(track_id, client_id, store_id) 
+  DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')
+`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec, store_id) VALUES (?, ?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time, store_id) VALUES (?, ?, datetime('now'), ?)`);
+const stmtCloseSession = db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND store_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+/* ================== MIDDLEWARES ================== */
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+// Basic Auth para admin
+function adminAuth(req, res, next) {
+  const u = process.env.ADMIN_USER || 'admin';
+  const p = process.env.ADMIN_PASS || 'changeme';
+  const h = req.headers['authorization'] || '';
+  
+  if (!h.startsWith('Basic ')) {
+    res.set('WWW-Authenticate', 'Basic realm="Admin"');
+    return res.status(401).send('Auth required');
+  }
+  
+  const [user, pass] = Buffer.from(h.slice(6), 'base64').toString().split(':');
+  if (user === u && pass === p) return next();
+  
+  res.set('WWW-Authenticate', 'Basic realm="Admin"');
+  return res.status(401).send('Unauthorized');
+}
+
+const ADMIN_PATHS = ['/admin', '/api/admin', '/api/scan'];
+app.use((req, res, next) => {
+  if (ADMIN_PATHS.some(p => req.path === p || req.path.startsWith(p))) {
+    return adminAuth(req, res, next);
+  }
+  next();
+});
+
+app.use('/public', express.static('public'));
+
+/* ================== HELPERS ================== */
+function stripExt(n) {
+  return n.replace(/\.[^./\\]+$/, '');
+}
+
+function parseArtistTitleFromFilename(filename) {
+  const base = stripExt(filename).trim();
+  let artist = '', title = base;
+  
+  const parts = base.split(' - ');
+  if (parts.length >= 2) {
+    artist = parts.shift().trim();
+    title = parts.join(' - ').trim();
+  } else {
+    const i = base.indexOf('-');
+    if (i > 0) {
+      artist = base.slice(0, i).trim();
+      title = base.slice(i + 1).trim();
+    }
+  }
+  
+  return { artist, title };
+}
+
+function sanitize(str) {
+  return String(str || '').trim().replace(/[<>"']/g, '');
+}
+
+function getStoreId(req) {
+  return sanitize(req.query.storeId || req.query.store || req.body?.storeId || req.body?.store || req.headers['x-store-id'] || DEFAULT_STORE);
+}
+
+function getClientId(req, res) {
+  let clientId = req.cookies?.clientId;
+  if (!clientId) {
+    clientId = nanoid(16);
+    res.cookie('clientId', clientId, { maxAge: 365 * 24 * 60 * 60 * 1000, httpOnly: true });
+  }
+  return clientId;
+}
+
+function shuffleArray(array) {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/* ================== SCAN SFTP ================== */
+app.post('/api/admin/scan', (req, res) => {
+  try {
+    const files = fs.readdirSync(MUSIC_DIR).filter(f => {
+      const ext = path.extname(f).toLowerCase();
+      return ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac'].includes(ext);
+    });
+
+    let added = 0, existing = 0;
+
+    for (const filename of files) {
+      const exists = db.prepare(`SELECT id FROM tracks WHERE filename = ?`).get(filename);
+      
+      if (!exists) {
+        const id = nanoid(12);
+        const meta = parseArtistTitleFromFilename(filename);
+        
+        stmtInsertTrack.run({
+          id,
+          filename,
+          artist: sanitize(meta.artist) || 'Artista Desconhecido',
+          title: sanitize(meta.title) || filename,
+          storeId: DEFAULT_STORE
+        });
+        added++;
+      } else {
+        existing++;
+      }
+    }
+
+    // Limpar banco de arquivos deletados
+    const allTracks = db.prepare(`SELECT id, filename FROM tracks`).all();
+    let removed = 0;
+    
+    for (const track of allTracks) {
+      const filePath = path.join(MUSIC_DIR, track.filename);
+      if (!fs.existsSync(filePath)) {
+        db.prepare(`DELETE FROM tracks WHERE id = ?`).run(track.id);
+        db.prepare(`DELETE FROM likes WHERE track_id = ?`).run(track.id);
+        db.prepare(`DELETE FROM events WHERE track_id = ?`).run(track.id);
+        removed++;
+      }
+    }
+
+    res.json({ 
+      ok: true, 
+      total: files.length,
+      added, 
+      existing, 
+      removed,
+      message: `✅ Scan completo: ${added} novas, ${existing} existentes, ${removed} removidas`
+    });
+  } catch (e) {
+    console.error('Scan error:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+/* ================== ROTAS PÚBLICAS ================== */
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+
+// Listar faixas (com randomização)
+app.get('/api/tracks', (req, res) => {
+  const shuffle = req.query.shuffle === 'true';
+  
+  let list = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`).all().map(t => {
+    let artist = t.artist, title = t.title;
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(t.filename);
+      artist = artist || d.artist || 'Artista';
+      title = title || d.title || t.filename;
+    }
+    return { 
+      id: t.id, 
+      artist, 
+      title, 
+      url: `/audio/${t.id}` 
+    };
+  });
+  
+  // 🎲 RANDOMIZAR PLAYLIST
+  if (shuffle) {
+    list = shuffleArray(list);
+  }
+  
+  res.json(list);
+});
+
+// Stream de áudio
+app.get('/audio/:trackId', (req, res) => {
+  const t = stmtFindTrack.get(req.params.trackId);
+  if (!t) return res.status(404).send('Track not found');
+  
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+  
+  const stat = fs.statSync(filePath);
+  const size = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+  
+  if (range) {
+    const [s, e] = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(s, 10);
+    const end = e ? parseInt(e, 10) : size - 1;
+    
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${size}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': (end - start) + 1,
+      'Content-Type': contentType
+    });
+    
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': size,
+      'Content-Type': contentType
+    });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+// Sistema de feedback
+app.get('/api/like/state', (req, res) => {
+  const { trackId, clientId } = req.query || {};
+  const storeId = getStoreId(req);
+  
+  if (!trackId || !clientId) {
+    return res.status(400).json({ error: 'Parâmetros inválidos' });
+  }
+  
+  const row = db.prepare(`
+    SELECT is_like FROM likes 
+    WHERE track_id = ? AND client_id = ? AND store_id = ?
+  `).get(trackId, clientId, storeId);
+  
+  const state = row == null ? null : (row.is_like ? 'like' : 'dislike');
+  res.json({ state });
+});
+
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  const storeId = getStoreId(req);
+  
+  if (!trackId || !clientId || typeof like !== 'boolean') {
+    return res.status(400).json({ error: 'Parâmetros inválidos' });
+  }
+  
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0, storeId);
+  res.json({ ok: true, state: like ? 'like' : 'dislike' });
+});
+
+// Eventos
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  const storeId = getStoreId(req);
+  
+  if (!clientId || !type) {
+    return res.status(400).json({ error: 'Parâmetros inválidos' });
+  }
+  
+  const day = new Date().toISOString().slice(0, 10);
+  
+  if (type === 'play') {
+    const count = db.prepare(`
+      SELECT COUNT(*) c FROM events 
+      WHERE client_id = ? AND store_id = ? 
+      AND event_type IN ('play', 'resume') 
+      AND DATE(created_at) = DATE('now')
+    `).get(clientId, storeId).c;
+    
+    if (count === 0) {
+      stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0, storeId);
+    }
+  }
+  
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (!open) stmtOpenSession.run(clientId, day, storeId);
+  }
+  
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (open) stmtCloseSession.run(open.id);
+  }
+  
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0, storeId);
+  res.json({ ok: true });
+});
+
+// Heartbeat (60s)
+app.post('/api/heartbeat', (req, res) => {
+  try {
+    const storeId = getStoreId(req);
+    const state = sanitize(req.body.state || '');
+    const trackId = sanitize(req.body.trackId || '');
+    
+    const nowLocal = db.prepare(`SELECT datetime('now', 'localtime') AS now`).get().now;
+    const day = db.prepare(`SELECT date('now', 'localtime') AS d`).get().d;
+    
+    db.prepare(`
+      INSERT INTO heartbeats (store_id, last_seen, state, track_id)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(store_id) DO UPDATE SET
+        last_seen = excluded.last_seen,
+        state = excluded.state,
+        track_id = excluded.track_id
+    `).run(storeId, nowLocal, state, trackId);
+    
+    const row = db.prepare(`
+      SELECT store_id, day, seconds_played, last_state, last_ts
+      FROM playtime_daily 
+      WHERE store_id = ? AND day = ?
+    `).get(storeId, day);
+    
+    const calcSeconds = (from, to) => {
+      const r = db.prepare(`SELECT (strftime('%s', ?) - strftime('%s', ?)) AS s`).get(to, from);
+      return Math.max(0, Math.min(Number(r ? r.s : 0), 60));
+    };
+    
+    if (!row) {
+      db.prepare(`
+        INSERT INTO playtime_daily (store_id, day, seconds_played, last_state, last_ts)
+        VALUES (?, ?, 0, ?, ?)
+      `).run(storeId, day, state, nowLocal);
+    } else {
+      let add = 0;
+      if (row.last_ts && row.last_state === 'playing') {
+        add = calcSeconds(row.last_ts, nowLocal);
+      }
+      
+      db.prepare(`
+        UPDATE playtime_daily
+        SET seconds_played = seconds_played + ?,
+            last_state = ?,
+            last_ts = ?
+        WHERE store_id = ? AND day = ?
+      `).run(add, state, nowLocal, storeId, day);
+    }
+    
+    res.json({ ok: true, storeId, state, trackId, now: nowLocal, day });
+  } catch (e) {
+    console.error('Heartbeat error:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+/* ================== ADMIN ================== */
+app.get('/admin', (_, res) => res.sendFile(path.resolve('public/admin.html')));
+
+// Console: listar músicas com filtros e métricas por loja
+app.get('/api/admin/tracks.json', (req, res) => {
+  try {
+    const q = sanitize(req.query.q || '');
+    const store = sanitize(req.query.store || '');
+    const onlyLikes = req.query.onlyLikes === '1';
+    const onlyDislikes = req.query.onlyDislikes === '1';
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
+    const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+    
+    let sql = `
+      SELECT
+        t.id, t.artist, t.title, t.store_id AS store, t.filename,
+        (SELECT COUNT(*) FROM likes WHERE track_id = t.id AND is_like = 1 ${store ? 'AND store_id = ?' : ''}) AS likes,
+        (SELECT COUNT(*) FROM likes WHERE track_id = t.id AND is_like = 0 ${store ? 'AND store_id = ?' : ''}) AS dislikes,
+        (SELECT COUNT(*) FROM events WHERE track_id = t.id AND event_type = 'play' ${store ? 'AND store_id = ?' : ''}) AS plays
+      FROM tracks t
+      WHERE 1=1
+    `;
+    
+    const params = [];
+    if (store) params.push(store, store, store);
+    
+    if (q) {
+      sql += ` AND (LOWER(t.artist) LIKE LOWER(?) OR LOWER(t.title) LIKE LOWER(?) OR LOWER(t.filename) LIKE LOWER(?))`;
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    
+    if (store) {
+      sql += ` AND t.store_id = ?`;
+      params.push(store);
+    }
+    
+    if (onlyLikes) {
+      sql += ` AND EXISTS (SELECT 1 FROM likes WHERE track_id = t.id AND is_like = 1 ${store ? 'AND store_id = ?' : ''})`;
+      if (store) params.push(store);
+    }
+    
+    if (onlyDislikes) {
+      sql += ` AND EXISTS (SELECT 1 FROM likes WHERE track_id = t.id AND is_like = 0 ${store ? 'AND store_id = ?' : ''})`;
+      if (store) params.push(store);
+    }
+    
+    sql += ` ORDER BY t.artist COLLATE NOCASE, t.title COLLATE NOCASE LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+    
+    const items = db.prepare(sql).all(...params);
+    
+    // Métricas detalhadas por loja para cada faixa
+    const itemsWithStoreMetrics = items.map(item => {
+      const storeMetrics = db.prepare(`
+        SELECT 
+          store_id,
+          SUM(CASE WHEN is_like = 1 THEN 1 ELSE 0 END) as likes,
+          SUM(CASE WHEN is_like = 0 THEN 1 ELSE 0 END) as dislikes
+        FROM likes
+        WHERE track_id = ?
+        GROUP BY store_id
+      `).all(item.id);
+      
+      return { ...item, storeMetrics };
+    });
+    
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM tracks`).get().c || 0;
+    
+    res.json({ ok: true, total, limit, offset, items: itemsWithStoreMetrics });
+  } catch (e) {
+    console.error('tracks.json error:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Deletar faixa
+app.post('/api/admin/track/delete', express.urlencoded({ extended: true }), (req, res) => {
+  try {
+    const id = sanitize(req.body.id || '');
+    if (!id) return res.status(400).json({ ok: false, error: 'missing id' });
+    
+    const row = db.prepare(`SELECT id, filename FROM tracks WHERE id = ?`).get(id);
+    if (!row) return res.status(404).json({ ok: false, error: 'not found' });
+    
+    // Remover dados
+    db.prepare(`DELETE FROM likes WHERE track_id = ?`).run(id);
+    db.prepare(`DELETE FROM events WHERE track_id = ?`).run(id);
+    db.prepare(`DELETE FROM tracks WHERE id = ?`).run(id);
+    
+    // Remover arquivo
+    try {
+      const filePath = path.join(MUSIC_DIR, row.filename);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {
+      console.warn('File unlink warning:', e);
+    }
+    
+    res.json({ ok: true, id, message: '✅ Faixa deletada com sucesso' });
+  } catch (e) {
+    console.error('track.delete error:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Interface web
+app.get('/admin/tracks', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`<!doctype html>
+<html lang="pt-BR"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Player TI&CIA · Catálogo</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,sans-serif;background:#f5f7fa;padding:24px}
+.header{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+h1{font-size:28px;font-weight:700;color:#1a202c;margin-bottom:20px;display:flex;align-items:center;gap:12px}
+.controls{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+input,select,button{padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px;font-family:inherit}
+input[type="text"]{flex:1;min-width:280px}
+input[type="checkbox"]{width:auto;margin-right:6px}
+button{background:#fff;cursor:pointer;transition:all 0.2s;font-weight:500;border:1px solid #cbd5e0}
+button:hover{background:#f7fafc;transform:translateY(-1px);box-shadow:0 2px 4px rgba(0,0,0,0.1)}
+button.primary{background:#3182ce;color:#fff;border:none}
+button.primary:hover{background:#2c5282}
+button.success{background:#38a169;color:#fff;border:none}
+button.success:hover{background:#2f855a}
+button.danger{background:#e53e3e;color:#fff;border:none}
+button.danger:hover{background:#c53030}
+.hint{color:#718096;font-size:13px;margin-top:12px}
+kbd{background:#edf2f7;border:1px solid #cbd5e0;border-radius:4px;padding:2px 6px;font-size:11px;font-family:monospace;color:#4a5568}
+.table-wrap{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+table{width:100%;border-collapse:collapse}
+thead{background:#edf2f7;border-bottom:2px solid #cbd5e0}
+th{padding:14px 16px;text-align:left;font-weight:600;font-size:13px;color:#4a5568;text-transform:uppercase;letter-spacing:0.5px}
+td{padding:16px;border-bottom:1px solid #f7fafc;font-size:14px}
+tr:hover{background:#f7fafc}
+.badge{display:inline-block;background:#edf2f7;color:#4a5568;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:500}
+.badge.itaipu{background:#ebf8ff;color:#2c5282}
+.badge.macae{background:#f0fff4;color:#276749}
+.badge.rio{background:#fef5e7;color:#975a16}
+.muted{color:#a0aec0;font-size:13px}
+.metrics{display:flex;gap:16px;margin-top:6px}
+.metric{font-size:13px;color:#718096}
+.metric strong{color:#2d3748;font-weight:600}
+.metric.likes strong{color:#38a169}
+.metric.dislikes strong{color:#e53e3e}
+.metric.plays strong{color:#3182ce}
+.store-detail{margin-top:8px;padding:8px;background:#f7fafc;border-radius:6px;font-size:12px;color:#4a5568}
+.store-item{display:inline-flex;align-items:center;gap:8px;margin-right:16px}
+.pagination{display:flex;gap:16px;align-items:center;justify-content:center;padding:24px;background:#fff;border-radius:12px;margin-top:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+.meta{text-align:center;color:#718096;padding:16px;font-size:14px}
+.actions{display:flex;gap:8px}
+.empty{text-align:center;padding:60px 20px;color:#a0aec0}
+.empty-icon{font-size:48px;margin-bottom:16px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🎵 Catálogo de Músicas</h1>
+  <div class="controls">
+    <select id="store">
+      <option value="">📍 Todas as lojas</option>
+      <option value="itaipu">Itaipu</option>
+      <option value="macae">Macaé</option>
+      <option value="rio">Rio</option>
+      <option value="default">Default</option>
+    </select>
+    <input id="q" type="text" placeholder="🔍 Buscar artista, música ou arquivo..."/>
+    <label style="display:flex;align-items:center;white-space:nowrap">
+      <input type="checkbox" id="onlyLikes"/> Apenas com ❤️ likes
+    </label>
+    <label style="display:flex;align-items:center;white-space:nowrap">
+      <input type="checkbox" id="onlyDislikes"/> Apenas com 👎 dislikes
+    </label>
+    <button class="primary" id="apply">Aplicar Filtros</button>
+    <button class="success" id="scan">🔄 Scan SFTP</button>
+  </div>
+  <div class="hint">
+    💡 Dicas: <kbd>Enter</kbd> aplica filtros · <kbd>PgUp</kbd>/<kbd>PgDn</kbd> navega páginas · Envie arquivos via SFTP para ./music/
+  </div>
+</div>
+
+<div class="meta" id="meta">Carregando...</div>
+
+<div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th style="width:22%">Artista</th>
+      <th style="width:24%">Música</th>
+      <th style="width:10%">Loja</th>
+      <th style="width:28%">Métricas</th>
+      <th style="width:16%">Ações</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<div class="pagination">
+  <button id="prev">← Anterior</button>
+  <span id="pageInfo" class="muted"></span>
+  <button id="next">Próxima →</button>
+</div>
+
+<script>
+let limit = 50, offset = 0, total = 0;
+
+function qs() { return new URLSearchParams(location.search); }
+
+function setQS(o) {
+  const p = qs();
+  Object.entries(o).forEach(([k, v]) => {
+    if (v === null || v === undefined || v === '') p.delete(k);
+    else p.set(k, v);
+  });
+  history.replaceState(null, '', '?' + p.toString());
+}
+
+function applyFromQS() {
+  const p = qs();
+  document.getElementById('store').value = p.get('store') || '';
+  document.getElementById('q').value = p.get('q') || '';
+  document.getElementById('onlyLikes').checked = p.get('onlyLikes') === '1';
+  document.getElementById('onlyDislikes').checked = p.get('onlyDislikes') === '1';
+  offset = parseInt(p.get('offset') || '0', 10) || 0;
+}
+
+async function load() {
+  applyFromQS();
+  const p = new URLSearchParams(qs());
+  p.set('limit', limit);
+  p.set('offset', offset);
+  
+  const r = await fetch('/api/admin/tracks.json?' + p.toString(), { credentials: 'include' });
+  if (!r.ok) {
+    alert('❌ Falha ao carregar: ' + r.status);
+    return;
+  }
+  
+  const js = await r.json();
+  total = js.total || 0;
+  
+  document.getElementById('meta').textContent = 
+    \`📊 Total: \${total} músicas no catálogo | Exibindo \${js.items.length} resultados\`;
+  
+  document.getElementById('pageInfo').textContent = 
+    \`Página \${Math.floor(offset / limit) + 1} de \${Math.max(1, Math.ceil(total / limit))}\`;
+  
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = '';
+  
+  if (!js.items || js.items.length === 0) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty"><div class="empty-icon">🎵</div><div>Nenhuma música encontrada</div><div class="muted" style="margin-top:8px">Envie arquivos via SFTP ou ajuste os filtros</div></td></tr>';
+    return;
+  }
+  
+  js.items.forEach(x => {
+    const tr = document.createElement('tr');
+    
+    let storeDetails = '';
+    if (x.storeMetrics && x.storeMetrics.length > 0) {
+      const details = x.storeMetrics.map(sm => 
+        \`<span class="store-item"><span class="badge \${sm.store_id}">\${sm.store_id}</span> ❤️ \${sm.likes || 0} · 👎 \${sm.dislikes || 0}</span>\`
+      ).join('');
+      storeDetails = \`<div class="store-detail">📍 Por loja: \${details}</div>\`;
+    }
+    
+    tr.innerHTML = \`
+      <td><strong>\${x.artist || 'Sem artista'}</strong></td>
+      <td>
+        <div>\${x.title || 'Sem título'}</div>
+        <div class="muted">\${x.filename || ''}</div>
+      </td>
+      <td><span class="badge \${x.store}">\${x.store || 'default'}</span></td>
+      <td>
+        <div class="metrics">
+          <span class="metric likes">❤️ <strong>\${x.likes || 0}</strong> likes</span>
+          <span class="metric dislikes">👎 <strong>\${x.dislikes || 0}</strong> dislikes</span>
+          <span class="metric plays">▶️ <strong>\${x.plays || 0}</strong> plays</span>
+        </div>
+        \${storeDetails}
+      </td>
+      <td>
+        <div class="actions">
+          <button class="danger btn-delete" data-id="\${x.id}" data-name="\${x.artist} - \${x.title}">🗑️ Excluir</button>
+        </div>
+      </td>
+    \`;
+    tb.appendChild(tr);
+  });
+  
+  document.querySelectorAll('.btn-delete').forEach(btn => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-id');
+      const name = btn.getAttribute('data-name');
+      
+      if (!confirm(\`⚠️ Excluir "\${name}"?\\n\\nIsso irá remover:\\n• Arquivo físico\\n• Todos os likes/dislikes\\n• Histórico de eventos\\n\\nEsta ação não pode ser desfeita!\`)) return;
+      
+      btn.disabled = true;
+      btn.textContent = '⏳ Excluindo...';
+      
+      const fd = new FormData();
+      fd.set('id', id);
+      
+      const r = await fetch('/api/admin/track/delete', {
+        method: 'POST',
+        body: fd,
+        credentials: 'include'
+      });
+      
+      if (!r.ok) {
+        alert('❌ Falha ao excluir');
+        btn.disabled = false;
+        btn.textContent = '🗑️ Excluir';
+        return;
+      }
+      
+      const result = await r.json();
+      alert(result.message || '✅ Faixa excluída com sucesso!');
+      load();
+    };
+  });
+}
+
+document.getElementById('scan').onclick = async () => {
+  const btn = document.getElementById('scan');
+  btn.disabled = true;
+  btn.textContent = '⏳ Scaneando...';
+  
+  const r = await fetch('/api/admin/scan', {
+    method: 'POST',
+    credentials: 'include'
+  });
+  
+  if (!r.ok) {
+    alert('❌ Falha no scan');
+    btn.disabled = false;
+    btn.textContent = '🔄 Scan SFTP';
+    return;
+  }
+  
+  const js = await r.json();
+  alert(js.message || '✅ Scan completo!');
+  btn.disabled = false;
+  btn.textContent = '🔄 Scan SFTP';
+  load();
+};
+
+document.getElementById('apply').onclick = () => {
+  offset = 0;
+  setQS({
+    store: document.getElementById('store').value.trim(),
+    q: document.getElementById('q').value.trim(),
+    onlyLikes: document.getElementById('onlyLikes').checked ? '1' : null,
+    onlyDislikes: document.getElementById('onlyDislikes').checked ? '1' : null,
+    offset: '0'
+  });
+  load();
+};
+
+document.getElementById('q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('apply').click();
+  }
+});
+
+document.getElementById('prev').onclick = () => {
+  offset = Math.max(0, offset - limit);
+  setQS({ offset: String(offset) });
+  load();
+};
+
+document.getElementById('next').onclick = () => {
+  if (offset + limit < total) {
+    offset += limit;
+    setQS({ offset: String(offset) });
+    load();
+  }
+};
+
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'PageDown') {
+    e.preventDefault();
+    document.getElementById('next').click();
+  }
+  if (e.key === 'PageUp') {
+    e.preventDefault();
+    document.getElementById('prev').click();
+  }
+});
+
+load();
+</script>
+</body>
+</html>\`);
+});
+
+// Overview dashboard
+app.get('/admin/overview', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(\`<!doctype html>
+<html lang="pt-BR"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Player TI&CIA · Overview</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f7fa;padding:24px}
+h1{font-size:28px;font-weight:700;color:#1a202c;margin-bottom:24px}
+.controls{background:#fff;border-radius:12px;padding:20px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+select,input,button{padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}
+button{background:#fff;cursor:pointer;transition:all 0.2s;font-weight:500}
+button:hover{background:#f7fafc}
+button.primary{background:#3182ce;color:#fff;border:none}
+.cards{display:grid;gap:20px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.card{background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+.card-title{font-size:18px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.status{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px}
+.status.playing{background:#38a169;animation:pulse 2s infinite}
+.status.paused{background:#ed8936}
+.status.offline{background:#e53e3e}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+.metric{margin:8px 0;font-size:14px;color:#4a5568}
+.metric strong{color:#2d3748;font-weight:600}
+.muted{color:#a0aec0;font-size:13px}
+a{color:#3182ce;text-decoration:none}
+a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<h1>📊 Overview dos Players</h1>
+<div class="controls">
+  <div class="row">
+    <label>Lojas:
+      <select id="stores" multiple size="4">
+        <option value="itaipu" selected>Itaipu</option>
+        <option value="macae" selected>Macaé</option>
+        <option value="rio" selected>Rio</option>
+        <option value="default">Default</option>
+      </select>
+    </label>
+    <label>Auto-refresh:
+      <select id="refresh">
+        <option value="0">Desligado</option>
+        <option value="5">5s</option>
+        <option value="10" selected>10s</option>
+        <option value="30">30s</option>
+        <option value="60">60s</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<div id="date" class="muted" style="margin-bottom:16px"></div>
+<div class="cards" id="cards"></div>
+
+<script>
+let timer = null;
+
+function getSelectedStores() {
+  const sel = document.getElementById('stores');
+  return Array.from(sel.selectedOptions).map(o => o.value);
+}
+
+function statusHTML(s) {
+  if (s === 'playing') return '<span class="status playing"></span>▶️ Tocando';
+  if (s === 'paused') return '<span class="status paused"></span>⏸️ Pausado';
+  return '<span class="status offline"></span>⭕ Offline';
+}
+
+async function load() {
+  const stores = getSelectedStores();
+  const qs = new URLSearchParams();
+  if (stores.length) qs.set('stores', stores.join(','));
+  
+  const r = await fetch('/api/admin/overview_json?' + qs.toString(), { credentials: 'include' });
+  if (!r.ok) {
+    alert('❌ Falha ao carregar: ' + r.status);
+    return;
+  }
+  
+  const js = await r.json();
+  document.getElementById('date').textContent = '📅 Data: ' + (js.date || '');
+  
+  const cards = document.getElementById('cards');
+  cards.innerHTML = '';
+  
+  (js.items || []).forEach(x => {
+    const now = x.now_playing 
+      ? \`<strong>\${x.now_playing.artist || ''}</strong> — \${x.now_playing.title || ''}\`
+      : '<em class="muted">Nenhuma música</em>';
+    
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = \`
+      <div class="card-title">🏪 \${x.store}</div>
+      <div style="margin:12px 0">\${statusHTML(x.status)}</div>
+      <div class="metric">🎵 Agora: \${now}</div>
+      <div class="metric">🕐 Primeiro play: \${x.first_play_today || '—'}</div>
+      <div class="metric">▶️ Plays hoje: <strong>\${x.metrics_today.plays}</strong></div>
+      <div class="metric">❤️ Likes hoje: <strong>\${x.metrics_today.likes}</strong></div>
+      <div class="metric">👎 Dislikes hoje: <strong>\${x.metrics_today.dislikes}</strong></div>
+      <div class="muted" style="margin-top:12px;font-size:12px">
+        Última atualização: \${x.last_seen || '—'}
+      </div>
+      <div style="margin-top:12px">
+        <a href="/?store=\${encodeURIComponent(x.store)}" target="_blank">🔗 Abrir player</a>
+      </div>
+    \`;
+    cards.appendChild(div);
+  });
+}
+
+document.getElementById('refresh').onchange = (e) => {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+  const s = parseInt(e.target.value, 10);
+  if (s > 0) timer = setInterval(load, s * 1000);
+};
+
+load();
+document.getElementById('refresh').dispatchEvent(new Event('change'));
+</script>
+</body>
+</html>\`);
+});
+
+// Overview JSON API
+app.get('/api/admin/overview_json', (req, res) => {
+  try {
+    const stores = (req.query.stores ? String(req.query.stores).split(',') : ['itaipu', 'macae', 'rio', 'default'])
+      .map(s => s.trim()).filter(Boolean);
+    
+    const getOne = (sql, ...p) => {
+      try { return db.prepare(sql).get(...p) || null; } catch { return null; }
+    };
+    
+    const getVal = (sql, ...p) => {
+      const r = getOne(sql, ...p);
+      return r ? Object.values(r)[0] : null;
+    };
+    
+    const today = getVal("SELECT date('now', 'localtime') AS d");
+    
+    const out = [];
+    for (const store of stores) {
+      const hb = getOne(\`SELECT store_id, last_seen, state, track_id FROM heartbeats WHERE store_id = ?\`, store);
+      
+      let status = 'offline';
+      if (hb && hb.last_seen) {
+        const last = getVal(\`SELECT (strftime('%s', 'now') - strftime('%s', ?)) AS delta\`, hb.last_seen);
+        status = (last !== null && Number(last) <= 60) ? (hb.state || 'online') : 'offline';
+      }
+      
+      let nowPlaying = null;
+      if (hb && hb.track_id) {
+        nowPlaying = getOne(\`SELECT id, artist, title FROM tracks WHERE id = ?\`, hb.track_id);
+      }
+      
+      const firstPlay = getVal(\`
+        SELECT MIN(created_at) AS first FROM events
+        WHERE store_id = ? AND event_type = 'play' AND date(created_at, 'localtime') = date('now', 'localtime')
+      \`, store);
+      
+      const playsToday = getVal(\`
+        SELECT COUNT(*) AS c FROM events
+        WHERE store_id = ? AND event_type = 'play' AND date(created_at, 'localtime') = date('now', 'localtime')
+      \`, store) || 0;
+      
+      const likesToday = getVal(\`
+        SELECT COUNT(*) AS c FROM likes
+        WHERE store_id = ? AND is_like = 1 AND date(created_at, 'localtime') = date('now', 'localtime')
+      \`, store) || 0;
+      
+      const dislikesToday = getVal(\`
+        SELECT COUNT(*) AS c FROM likes
+        WHERE store_id = ? AND is_like = 0 AND date(created_at, 'localtime') = date('now', 'localtime')
+      \`, store) || 0;
+      
+      out.push({
+        store,
+        status,
+        last_seen: hb ? hb.last_seen : null,
+        now_playing: nowPlaying,
+        first_play_today: firstPlay,
+        metrics_today: {
+          plays: Number(playsToday),
+          likes: Number(likesToday),
+          dislikes: Number(dislikesToday)
+        }
+      });
+    }
+    
+    res.json({ ok: true, date: today, items: out });
+  } catch (e) {
+    console.error('overview_json error:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+/* ================== START SERVER ================== */
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(\`
+╔════════════════════════════════════════╗
+║  🎵 Player TI&CIA Server Running      ║
+║  📡 Port: \${PORT}                        ║
+║  📁 Music: ./music                     ║
+║  🗄️  Database: ./data/mvp.db           ║
+║                                        ║
+║  🔐 Admin: /admin                      ║
+║  📊 Overview: /admin/overview          ║
+║  🎛️  Console: /admin/tracks            ║
+║                                        ║
+║  👤 User: \${process.env.ADMIN_USER || 'admin'}                   ║
+║  🔑 Pass: \${process.env.ADMIN_PASS || 'changeme'}                ║
+╚════════════════════════════════════════╝
+  \`);
+});

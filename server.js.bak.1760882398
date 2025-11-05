@@ -1,0 +1,1585 @@
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import multer from 'multer';
+import Database from 'better-sqlite3';
+import bodyParser from 'body-parser';
+import cors from 'cors';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT
+);
+`);
+
+const stmtInsertTrack = db.prepare(`INSERT INTO tracks (id, filename, artist, title) VALUES (@id, @filename, @artist, @title)`);
+const stmtAllTracks   = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`);
+const stmtFindTrack   = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike  = db.prepare(`INSERT INTO likes (track_id, client_id, is_like) VALUES (?, ?, ?)
+  ON CONFLICT(track_id, client_id) DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec) VALUES (?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time) VALUES (?, ?, datetime('now'))`);
+const stmtCloseSession= db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/public', express.static('public'));
+
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+
+app.get('/api/tracks', (req, res) => {
+  const list = stmtAllTracks.all().map(t => ({
+    id: t.id,
+    artist: t.artist || 'Artista',
+    title: t.title || t.filename,
+    url: `/audio/${t.id}`
+  }));
+  res.json(list);
+});
+
+app.get('/audio/:trackId', (req, res) => {
+  const { trackId } = req.params;
+  const t = stmtFindTrack.get(trackId);
+  if (!t) return res.status(404).send('Track not found');
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const chunkSize = (end - start) + 1;
+    const file = fs.createReadStream(filePath, { start, end });
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunkSize,
+      'Content-Type': contentType
+    });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': contentType
+    });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+const upload = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.get('/upload', (_, res) => res.sendFile(path.resolve('public/upload.html')));
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo' });
+    const { originalname, path: tmpPath } = req.file;
+    const { artist = '', title = '' } = req.body || {};
+    const id = nanoid(12);
+    const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_.-]+/g, '_')}`;
+    const finalPath = path.join(MUSIC_DIR, safeName);
+    fs.renameSync(tmpPath, finalPath);
+    stmtInsertTrack.run({ id, filename: safeName, artist, title });
+    res.json({ ok: true, id });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Falha no upload' });
+  }
+});
+
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  if (!trackId || !clientId || typeof like !== 'boolean') return res.status(400).json({ error: 'Parâmetros inválidos' });
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0);
+  res.json({ ok: true });
+});
+
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  if (!clientId || !type) return res.status(400).json({ error: 'Parâmetros inválidos' });
+
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+
+  if (type === 'play') {
+    const c = db.prepare(`SELECT COUNT(*) as c FROM events WHERE client_id = ? AND event_type IN ('play','resume') AND DATE(created_at) = DATE('now')`).get(clientId).c;
+    if (c === 0) stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0);
+  }
+
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (!open) stmtOpenSession.run(clientId, day);
+  }
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (open) stmtCloseSession.run(open.id);
+  }
+
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0);
+  res.json({ ok: true });
+});
+
+app.get('/api/report/daily', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+
+  const sessions = db.prepare(`
+    SELECT start_time, end_time FROM sessions
+    WHERE DATE(start_time) = DATE(?)
+  `).all(date);
+
+  const totalSeconds = sessions.reduce((acc, s) => {
+    if (!s.end_time) return acc;
+    const start = new Date(s.start_time);
+    const end = new Date(s.end_time);
+    return acc + Math.max(0, (end - start) / 1000);
+  }, 0);
+
+  const counts = db.prepare(`
+    SELECT event_type as type, COUNT(*) as c
+    FROM events WHERE DATE(created_at) = DATE(?)
+    GROUP BY event_type
+  `).all(date);
+
+  const likes = db.prepare(`
+    SELECT t.id, t.artist, t.title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id
+    GROUP BY t.id
+    ORDER BY likes DESC
+  `).all();
+
+  res.json({
+    date,
+    totals: {
+      totalSecondsPlayed: Math.round(totalSeconds),
+      events: counts.reduce((m, r) => ({ ...m, [r.type]: r.c }), {})
+    },
+    tracks: likes
+  });
+});
+
+app.listen(PORT, () => console.log(`Player TI&CIA rodando na porta ${PORT}`));
+import express from 'express';
+import multer from 'multer';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
+import path from 'path';
+import fs from 'fs';
+import mime from 'mime';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT
+);
+`);
+
+const stmtInsertTrack = db.prepare(`INSERT INTO tracks (id, filename, artist, title) VALUES (@id, @filename, @artist, @title)`);
+const stmtAllTracks   = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`);
+const stmtFindTrack   = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike  = db.prepare(`INSERT INTO likes (track_id, client_id, is_like) VALUES (?, ?, ?)
+  ON CONFLICT(track_id, client_id) DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec) VALUES (?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time) VALUES (?, ?, datetime('now'))`);
+const stmtCloseSession= db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/public', express.static('public'));
+
+function stripExt(name) {
+  return name.replace(/\.[^./\\]+$/,'');
+}
+function parseArtistTitleFromFilename(filename) {
+  // Ex.: "Artista - Música (remix).mp3" → { artist: "Artista", title: "Música (remix)" }
+  const base = stripExt(filename).trim();
+  // tenta separar pelo primeiro " - " (com espaços). Se não tiver, tenta por "-"
+  let artist = '';
+  let title = base;
+  const m = base.split(' - ');
+  if (m.length >= 2) {
+    artist = m.shift().trim();
+    title  = m.join(' - ').trim();
+  } else {
+    const idx = base.indexOf('-');
+    if (idx > 0) {
+      artist = base.slice(0, idx).trim();
+      title  = base.slice(idx + 1).trim();
+    }
+  }
+  return { artist, title };
+}
+
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+
+app.get('/api/tracks', (req, res) => {
+  const list = stmtAllTracks.all().map(t => {
+    // fallback: se não tiver meta salvo, tenta derivar do filename
+    let artist = t.artist;
+    let title = t.title;
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(t.filename);
+      artist = artist || d.artist || 'Artista';
+      title  = title  || d.title  || t.filename;
+    }
+    return {
+      id: t.id,
+      artist,
+      title,
+      url: `/audio/${t.id}`
+    };
+  });
+  res.json(list);
+});
+
+app.get('/audio/:trackId', (req, res) => {
+  const { trackId } = req.params;
+  const t = stmtFindTrack.get(trackId);
+  if (!t) return res.status(404).send('Track not found');
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const chunkSize = (end - start) + 1;
+    const file = fs.createReadStream(filePath, { start, end });
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunkSize,
+      'Content-Type': contentType
+    });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': contentType
+    });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+const upload = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.get('/upload', (_, res) => res.sendFile(path.resolve('public/upload.html')));
+
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo' });
+    const { originalname, path: tmpPath } = req.file;
+
+    // Se vier preenchido no formulário, usamos; senão, derivamos do nome do arquivo
+    let { artist = '', title = '' } = req.body || {};
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(originalname);
+      artist = artist || d.artist;
+      title  = title  || d.title;
+    }
+
+    const id = nanoid(12);
+    const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`; // preserva espaço e hífen
+    const finalPath = path.join(MUSIC_DIR, safeName);
+    fs.renameSync(tmpPath, finalPath);
+
+    stmtInsertTrack.run({ id, filename: safeName, artist, title });
+    res.json({ ok: true, id, artist, title });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Falha no upload' });
+  }
+});
+
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  if (!trackId || !clientId || typeof like !== 'boolean') return res.status(400).json({ error: 'Parâmetros inválidos' });
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0);
+  res.json({ ok: true });
+});
+
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  if (!clientId || !type) return res.status(400).json({ error: 'Parâmetros inválidos' });
+
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+
+  if (type === 'play') {
+    const c = db.prepare(`SELECT COUNT(*) as c FROM events WHERE client_id = ? AND event_type IN ('play','resume') AND DATE(created_at) = DATE('now')`).get(clientId).c;
+    if (c === 0) stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0);
+  }
+
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (!open) stmtOpenSession.run(clientId, day);
+  }
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (open) stmtCloseSession.run(open.id);
+  }
+
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0);
+  res.json({ ok: true });
+});
+
+app.get('/api/report/daily', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+
+  const sessions = db.prepare(`
+    SELECT start_time, end_time FROM sessions
+    WHERE DATE(start_time) = DATE(?)
+  `).all(date);
+
+  const totalSeconds = sessions.reduce((acc, s) => {
+    if (!s.end_time) return acc;
+    const start = new Date(s.start_time);
+    const end = new Date(s.end_time);
+    return acc + Math.max(0, (end - start) / 1000);
+  }, 0);
+
+  const counts = db.prepare(`
+    SELECT event_type as type, COUNT(*) as c
+    FROM events WHERE DATE(created_at) = DATE(?)
+    GROUP BY event_type
+  `).all(date);
+
+  const likes = db.prepare(`
+    SELECT t.id, t.artist, t.title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id
+    GROUP BY t.id
+    ORDER BY likes DESC
+  `).all();
+
+  res.json({
+    date,
+    totals: {
+      totalSecondsPlayed: Math.round(totalSeconds),
+      events: counts.reduce((m, r) => ({ ...m, [r.type]: r.c }), {})
+    },
+    tracks: likes
+  });
+});
+
+app.listen(PORT, () => console.log(`Player TI&CIA rodando na porta ${PORT}`));
+import express from 'express';
+import multer from 'multer';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
+import path from 'path';
+import fs from 'fs';
+import mime from 'mime';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT
+);
+`);
+
+const stmtInsertTrack = db.prepare(`INSERT INTO tracks (id, filename, artist, title) VALUES (@id, @filename, @artist, @title)`);
+const stmtAllTracks   = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`);
+const stmtFindTrack   = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike  = db.prepare(`INSERT INTO likes (track_id, client_id, is_like) VALUES (?, ?, ?)
+  ON CONFLICT(track_id, client_id) DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec) VALUES (?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time) VALUES (?, ?, datetime('now'))`);
+const stmtCloseSession= db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/public', express.static('public'));
+
+function stripExt(name) { return name.replace(/\.[^./\\]+$/,''); }
+function parseArtistTitleFromFilename(filename) {
+  const base = stripExt(filename).trim();
+  let artist = '', title = base;
+  const parts = base.split(' - ');
+  if (parts.length >= 2) {
+    artist = parts.shift().trim();
+    title  = parts.join(' - ').trim();
+  } else {
+    const idx = base.indexOf('-');
+    if (idx > 0) { artist = base.slice(0, idx).trim(); title = base.slice(idx+1).trim(); }
+  }
+  return { artist, title };
+}
+
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+
+/* ---------- API: tracks (lista para o player) ---------- */
+app.get('/api/tracks', (req, res) => {
+  const list = stmtAllTracks.all().map(t => {
+    let artist = t.artist, title = t.title;
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(t.filename);
+      artist = artist || d.artist || 'Artista';
+      title  = title  || d.title  || t.filename;
+    }
+    return { id: t.id, artist, title, url: `/audio/${t.id}` };
+  });
+  res.json(list);
+});
+
+/* ---------- streaming ---------- */
+app.get('/audio/:trackId', (req, res) => {
+  const t = stmtFindTrack.get(req.params.trackId);
+  if (!t) return res.status(404).send('Track not found');
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+
+  if (range) {
+    const [startStr, endStr] = range.replace(/bytes=/,'').split('-');
+    const start = parseInt(startStr,10);
+    const end = endStr ? parseInt(endStr,10) : fileSize-1;
+    const file = fs.createReadStream(filePath, { start, end });
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': (end-start)+1,
+      'Content-Type': contentType
+    });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, { 'Content-Length': fileSize, 'Content-Type': contentType });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+/* ---------- Upload (single, compat) ---------- */
+const upload = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.get('/upload', (_, res) => res.sendFile(path.resolve('public/upload.html')));
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo' });
+    const { originalname, path: tmpPath } = req.file;
+    let { artist = '', title = '' } = req.body || {};
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(originalname);
+      artist = artist || d.artist;
+      title  = title  || d.title;
+    }
+    const id = nanoid(12);
+    const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+    fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+    stmtInsertTrack.run({ id, filename: safeName, artist, title });
+    res.json({ ok: true, id, artist, title });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload' }); }
+});
+
+/* ---------- Upload em LOTE (novo) ---------- */
+app.get('/upload-batch', (_, res) => res.sendFile(path.resolve('public/upload-batch.html')));
+
+const uploadMany = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.post('/api/upload/batch', uploadMany.array('files', 100), (req, res) => {
+  try {
+    const results = [];
+    (req.files || []).forEach(f => {
+      const id = nanoid(12);
+      const { originalname, path: tmpPath } = f;
+      const meta = parseArtistTitleFromFilename(originalname);
+      const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+      fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+      stmtInsertTrack.run({ id, filename: safeName, artist: meta.artist, title: meta.title });
+      results.push({ id, artist: meta.artist, title: meta.title, filename: safeName });
+    });
+    res.json({ ok: true, count: results.length, items: results });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload em lote' }); }
+});
+
+/* ---------- Likes / Eventos / Relatório ---------- */
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  if (!trackId || !clientId || typeof like !== 'boolean') return res.status(400).json({ error: 'Parâmetros inválidos' });
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0);
+  res.json({ ok: true });
+});
+
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  if (!clientId || !type) return res.status(400).json({ error: 'Parâmetros inválidos' });
+  const now = new Date(), day = now.toISOString().slice(0,10);
+  if (type === 'play') {
+    const c = db.prepare(`SELECT COUNT(*) c FROM events WHERE client_id = ? AND event_type IN ('play','resume') AND DATE(created_at) = DATE('now')`).get(clientId).c;
+    if (c === 0) stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0);
+  }
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (!open) stmtOpenSession.run(clientId, day);
+  }
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (open) stmtCloseSession.run(open.id);
+  }
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0);
+  res.json({ ok: true });
+});
+
+app.get('/api/report/daily', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const sessions = db.prepare(`SELECT start_time, end_time FROM sessions WHERE DATE(start_time) = DATE(?)`).all(date);
+  const totalSeconds = sessions.reduce((acc, s) => (!s.end_time ? acc : acc + Math.max(0, (new Date(s.end_time) - new Date(s.start_time))/1000)), 0);
+  const counts = db.prepare(`SELECT event_type type, COUNT(*) c FROM events WHERE DATE(created_at) = DATE(?) GROUP BY event_type`).all(date);
+  const likes = db.prepare(`
+    SELECT t.id, t.artist, t.title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id
+    GROUP BY t.id
+    ORDER BY likes DESC`).all();
+
+  res.json({ date,
+    totals: { totalSecondsPlayed: Math.round(totalSeconds), events: counts.reduce((m,r)=>({ ...m, [r.type]: r.c }),{}) },
+    tracks: likes });
+});
+
+app.listen(PORT, () => console.log(`Player TI&CIA rodando na porta ${PORT}`));
+import express from 'express';
+import multer from 'multer';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
+import path from 'path';
+import fs from 'fs';
+import mime from 'mime';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT
+);
+`);
+
+const stmtInsertTrack = db.prepare(`INSERT INTO tracks (id, filename, artist, title) VALUES (@id, @filename, @artist, @title)`);
+const stmtAllTracks   = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`);
+const stmtFindTrack   = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike  = db.prepare(`INSERT INTO likes (track_id, client_id, is_like) VALUES (?, ?, ?)
+  ON CONFLICT(track_id, client_id) DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec) VALUES (?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time) VALUES (?, ?, datetime('now'))`);
+const stmtCloseSession= db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/public', express.static('public'));
+
+function stripExt(name) { return name.replace(/\.[^./\\]+$/,''); }
+function parseArtistTitleFromFilename(filename) {
+  const base = stripExt(filename).trim();
+  let artist = '', title = base;
+  const parts = base.split(' - ');
+  if (parts.length >= 2) {
+    artist = parts.shift().trim();
+    title  = parts.join(' - ').trim();
+  } else {
+    const idx = base.indexOf('-');
+    if (idx > 0) { artist = base.slice(0, idx).trim(); title = base.slice(idx+1).trim(); }
+  }
+  return { artist, title };
+}
+
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+
+/* ---------- API: tracks (lista para o player) ---------- */
+app.get('/api/tracks', (req, res) => {
+  const list = stmtAllTracks.all().map(t => {
+    let artist = t.artist, title = t.title;
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(t.filename);
+      artist = artist || d.artist || 'Artista';
+      title  = title  || d.title  || t.filename;
+    }
+    return { id: t.id, artist, title, url: `/audio/${t.id}` };
+  });
+  res.json(list);
+});
+
+/* ---------- streaming ---------- */
+app.get('/audio/:trackId', (req, res) => {
+  const t = stmtFindTrack.get(req.params.trackId);
+  if (!t) return res.status(404).send('Track not found');
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+
+  if (range) {
+    const [startStr, endStr] = range.replace(/bytes=/,'').split('-');
+    const start = parseInt(startStr,10);
+    const end = endStr ? parseInt(endStr,10) : fileSize-1;
+    const file = fs.createReadStream(filePath, { start, end });
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': (end-start)+1,
+      'Content-Type': contentType
+    });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, { 'Content-Length': fileSize, 'Content-Type': contentType });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+/* ---------- Upload (single) ---------- */
+const upload = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.get('/upload', (_, res) => res.sendFile(path.resolve('public/upload.html')));
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo' });
+    const { originalname, path: tmpPath } = req.file;
+    let { artist = '', title = '' } = req.body || {};
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(originalname);
+      artist = artist || d.artist;
+      title  = title  || d.title;
+    }
+    const id = nanoid(12);
+    const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+    fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+    stmtInsertTrack.run({ id, filename: safeName, artist, title });
+    res.json({ ok: true, id, artist, title });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload' }); }
+});
+
+/* ---------- Upload em LOTE (já feito) ---------- */
+app.get('/upload-batch', (_, res) => res.sendFile(path.resolve('public/upload-batch.html')));
+const uploadMany = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.post('/api/upload/batch', uploadMany.array('files', 100), (req, res) => {
+  try {
+    const results = [];
+    (req.files || []).forEach(f => {
+      const id = nanoid(12);
+      const { originalname, path: tmpPath } = f;
+      const meta = parseArtistTitleFromFilename(originalname);
+      const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+      fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+      stmtInsertTrack.run({ id, filename: safeName, artist: meta.artist, title: meta.title });
+      results.push({ id, artist: meta.artist, title: meta.title, filename: safeName });
+    });
+    res.json({ ok: true, count: results.length, items: results });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload em lote' }); }
+});
+
+/* ---------- Likes / Eventos / Relatório ---------- */
+app.get('/api/like/state', (req, res) => {
+  const { trackId, clientId } = req.query || {};
+  if (!trackId || !clientId) return res.status(400).json({ error: 'Parâmetros inválidos' });
+  const row = db.prepare(`SELECT is_like FROM likes WHERE track_id=? AND client_id=?`).get(trackId, clientId);
+  const state = row == null ? null : (row.is_like ? 'like' : 'dislike');
+  res.json({ state });
+});
+
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  if (!trackId || !clientId || typeof like !== 'boolean') return res.status(400).json({ error: 'Parâmetros inválidos' });
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0);
+  res.json({ ok: true, state: like ? 'like' : 'dislike' });
+});
+
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  if (!clientId || !type) return res.status(400).json({ error: 'Parâmetros inválidos' });
+  const day = new Date().toISOString().slice(0,10);
+  if (type === 'play') {
+    const c = db.prepare(`SELECT COUNT(*) c FROM events WHERE client_id = ? AND event_type IN ('play','resume') AND DATE(created_at) = DATE('now')`).get(clientId).c;
+    if (c === 0) stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0);
+  }
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (!open) stmtOpenSession.run(clientId, day);
+  }
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day);
+    if (open) stmtCloseSession.run(open.id);
+  }
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0);
+  res.json({ ok: true });
+});
+
+app.get('/api/report/daily', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const sessions = db.prepare(`SELECT start_time, end_time FROM sessions WHERE DATE(start_time) = DATE(?)`).all(date);
+  const totalSeconds = sessions.reduce((acc, s) => (!s.end_time ? acc : acc + Math.max(0, (new Date(s.end_time) - new Date(s.start_time))/1000)), 0);
+  const counts = db.prepare(`SELECT event_type type, COUNT(*) c FROM events WHERE DATE(created_at) = DATE(?) GROUP BY event_type`).all(date);
+  const likes = db.prepare(`
+    SELECT t.id, t.artist, t.title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id
+    GROUP BY t.id
+    ORDER BY likes DESC`).all();
+
+  res.json({ date,
+    totals: { totalSecondsPlayed: Math.round(totalSeconds), events: counts.reduce((m,r)=>({ ...m, [r.type]: r.c }),{}) },
+    tracks: likes });
+});
+
+app.listen(PORT, () => console.log(`Player TI&CIA rodando na porta ${PORT}`));
+import express from 'express';
+import multer from 'multer';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
+import path from 'path';
+import fs from 'fs';
+import mime from 'mime';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const DEFAULT_STORE = process.env.STORE_ID || 'default';
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+/* ------------------ MIGRAÇÃO / SCHEMA ------------------ */
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id, store_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}'
+);
+`);
+/* Adiciona colunas store_id se não existirem (idempotente) */
+try { db.exec(`ALTER TABLE likes ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+try { db.exec(`ALTER TABLE events ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+try { db.exec(`ALTER TABLE sessions ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+
+const stmtInsertTrack = db.prepare(`INSERT INTO tracks (id, filename, artist, title) VALUES (@id, @filename, @artist, @title)`);
+const stmtAllTracks   = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`);
+const stmtFindTrack   = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike  = db.prepare(`INSERT INTO likes (track_id, client_id, is_like, store_id) VALUES (?, ?, ?, ?)
+  ON CONFLICT(track_id, client_id, store_id) DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec, store_id) VALUES (?, ?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time, store_id) VALUES (?, ?, datetime('now'), ?)`);
+const stmtCloseSession= db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND store_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/public', express.static('public'));
+
+function stripExt(name) { return name.replace(/\.[^./\\]+$/,''); }
+function parseArtistTitleFromFilename(filename) {
+  const base = stripExt(filename).trim();
+  let artist = '', title = base;
+  const parts = base.split(' - ');
+  if (parts.length >= 2) { artist = parts.shift().trim(); title = parts.join(' - ').trim(); }
+  else {
+    const idx = base.indexOf('-');
+    if (idx > 0) { artist = base.slice(0, idx).trim(); title = base.slice(idx+1).trim(); }
+  }
+  return { artist, title };
+}
+function getStoreId(req) {
+  return (req.query.storeId || req.body?.storeId || req.headers['x-store-id'] || DEFAULT_STORE).toString();
+}
+
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+app.get('/admin', adminAuth, (_, res) => res.sendFile(path.resolve('public/admin.html')));
+
+/* ------------------ TRACKS LIST ------------------ */
+app.get('/api/tracks', (req, res) => {
+  const list = stmtAllTracks.all().map(t => {
+    let artist = t.artist, title = t.title;
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(t.filename);
+      artist = artist || d.artist || 'Artista';
+      title  = title  || d.title  || t.filename;
+    }
+    return { id: t.id, artist, title, url: `/audio/${t.id}` };
+  });
+  res.json(list);
+});
+
+/* ------------------ STREAMING ------------------ */
+app.get('/audio/:trackId', (req, res) => {
+  const t = stmtFindTrack.get(req.params.trackId);
+  if (!t) return res.status(404).send('Track not found');
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+
+  if (range) {
+    const [startStr, endStr] = range.replace(/bytes=/,'').split('-');
+    const start = parseInt(startStr,10);
+    const end = endStr ? parseInt(endStr,10) : fileSize-1;
+    const file = fs.createReadStream(filePath, { start, end });
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': (end-start)+1,
+      'Content-Type': contentType
+    });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, { 'Content-Length': fileSize, 'Content-Type': contentType });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+/* ------------------ UPLOADS ------------------ */
+const upload = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.get('/upload', (_, res) => res.sendFile(path.resolve('public/upload.html')));
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo' });
+    const { originalname, path: tmpPath } = req.file;
+    let { artist = '', title = '' } = req.body || {};
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(originalname);
+      artist = artist || d.artist;
+      title  = title  || d.title;
+    }
+    const id = nanoid(12);
+    const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+    fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+    stmtInsertTrack.run({ id, filename: safeName, artist, title });
+    res.json({ ok: true, id, artist, title });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload' }); }
+});
+
+/* Upload em lote */
+app.get('/upload-batch', (_, res) => res.sendFile(path.resolve('public/upload-batch.html')));
+const uploadMany = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.post('/api/upload/batch', uploadMany.array('files', 100), (req, res) => {
+  try {
+    const results = [];
+    (req.files || []).forEach(f => {
+      const id = nanoid(12);
+      const { originalname, path: tmpPath } = f;
+      const meta = parseArtistTitleFromFilename(originalname);
+      const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+      fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+      stmtInsertTrack.run({ id, filename: safeName, artist: meta.artist, title: meta.title });
+      results.push({ id, artist: meta.artist, title: meta.title, filename: safeName });
+    });
+    res.json({ ok: true, count: results.length, items: results });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload em lote' }); }
+});
+
+/* ------------------ LIKES / ESTADO ------------------ */
+app.get('/api/like/state', (req, res) => {
+  const { trackId, clientId } = req.query || {};
+  const storeId = getStoreId(req);
+  if (!trackId || !clientId) return res.status(400).json({ error: 'Parâmetros inválidos' });
+  const row = db.prepare(`SELECT is_like FROM likes WHERE track_id=? AND client_id=? AND store_id=?`).get(trackId, clientId, storeId);
+  const state = row == null ? null : (row.is_like ? 'like' : 'dislike');
+  res.json({ state });
+});
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  const storeId = getStoreId(req);
+  if (!trackId || !clientId || typeof like !== 'boolean') return res.status(400).json({ error: 'Parâmetros inválidos' });
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0, storeId);
+  res.json({ ok: true, state: like ? 'like' : 'dislike' });
+});
+
+/* ------------------ EVENTOS / SESSÕES ------------------ */
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  const storeId = getStoreId(req);
+  if (!clientId || !type) return res.status(400).json({ error: 'Parâmetros inválidos' });
+
+  const day = new Date().toISOString().slice(0,10);
+
+  if (type === 'play') {
+    const c = db.prepare(`
+      SELECT COUNT(*) c FROM events
+      WHERE client_id=? AND store_id=? AND event_type IN ('play','resume') AND DATE(created_at)=DATE('now')`)
+      .get(clientId, storeId).c;
+    if (c === 0) stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0, storeId);
+  }
+
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (!open) stmtOpenSession.run(clientId, day, storeId);
+  }
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (open) stmtCloseSession.run(open.id);
+  }
+
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0, storeId);
+  res.json({ ok: true });
+});
+
+/* ------------------ RELATÓRIOS ------------------ */
+function computeTotalsWithLive(date, storeId) {
+  // sessões fechadas
+  const sessions = db.prepare(`
+    SELECT start_time, end_time FROM sessions
+    WHERE DATE(start_time)=DATE(?) AND store_id=?`).all(date, storeId);
+  let total = 0;
+  for (const s of sessions) {
+    const start = new Date(s.start_time);
+    const end = s.end_time ? new Date(s.end_time) : new Date(); // conta sessão aberta até agora
+    total += Math.max(0, (end - start) / 1000);
+  }
+  // eventos
+  const evs = db.prepare(`
+    SELECT event_type type, COUNT(*) c FROM events
+    WHERE DATE(created_at)=DATE(?) AND store_id=? GROUP BY event_type`).all(date, storeId);
+  const eventsMap = evs.reduce((m,r)=> (m[r.type]=r.c, m), {});
+  // quando começou hoje (primeira sessão do dia)
+  const first = db.prepare(`
+    SELECT start_time FROM sessions
+    WHERE DATE(start_time)=DATE(?) AND store_id=?
+    ORDER BY start_time ASC LIMIT 1`).get(date, storeId);
+  return { totalSecondsPlayed: Math.round(total), events: eventsMap, dayStart: first?.start_time || null };
+}
+
+app.get('/api/report/daily', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const storeId = getStoreId(req);
+  const totals = computeTotalsWithLive(date, storeId);
+  const likes = db.prepare(`
+    SELECT t.id, t.artist, t.title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id AND l.store_id = ?
+    GROUP BY t.id
+    ORDER BY likes DESC`).all(storeId);
+  res.json({ date, storeId, totals, tracks: likes });
+});
+
+/* CSV por dia e loja */
+app.get('/api/report/csv', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const storeId = getStoreId(req);
+  const rows = db.prepare(`
+    SELECT t.id as track_id, COALESCE(t.artist, '') as artist, COALESCE(t.title,'') as title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id AND l.store_id = ?
+    GROUP BY t.id
+    ORDER BY likes DESC, dislikes ASC`).all(storeId);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="report_${storeId}_${date}.csv"`);
+  res.write('track_id,artist,title,likes,dislikes\n');
+  for (const r of rows) {
+    const esc = (s)=> `"${String(s??'').replace(/"/g,'""')}"`;
+    res.write([r.track_id, esc(r.artist), esc(r.title), r.likes||0, r.dislikes||0].join(',')+'\n');
+  }
+  res.end();
+});
+
+/* lojas conhecidas (deduzidas do banco) */
+app.get('/api/stores', adminAuth, (_req, res) => {
+  const rows = db.prepare(`
+    SELECT store_id FROM (
+      SELECT store_id FROM likes
+      UNION
+      SELECT store_id FROM events
+      UNION
+      SELECT store_id FROM sessions
+    ) WHERE store_id IS NOT NULL AND store_id <> '' GROUP BY store_id ORDER BY store_id`).all();
+  const list = rows.map(r=>r.store_id);
+  if (!list.includes(DEFAULT_STORE)) list.unshift(DEFAULT_STORE);
+  res.json({ stores: [...new Set(list)] });
+});
+
+/* música atual por loja (último play/resume do dia) */
+app.get('/api/now-playing', adminAuth, (req, res) => {
+  const storeId = getStoreId(req);
+  const row = db.prepare(`
+    SELECT e.track_id, e.created_at
+    FROM events e
+    WHERE e.store_id=? AND DATE(e.created_at)=DATE('now') AND e.event_type IN ('play','resume')
+    ORDER BY e.id DESC LIMIT 1
+  `).get(storeId);
+  if (!row) return res.json({ storeId, nowPlaying: null });
+  const t = row.track_id ? stmtFindTrack.get(row.track_id) : null;
+  let artist=null, title=null;
+  if (t) {
+    const meta = parseArtistTitleFromFilename(t.filename);
+    artist = t.artist || meta.artist || 'Artista';
+    title  = t.title  || meta.title  || t.filename;
+  }
+  res.json({ storeId, nowPlaying: row.track_id ? { trackId: row.track_id, artist, title, since: row.created_at } : null });
+});
+
+app.listen(PORT, () => console.log(`Player TI&CIA rodando na porta ${PORT}`));
+import express from 'express';
+import multer from 'multer';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
+import path from 'path';
+import fs from 'fs';
+import mime from 'mime';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const DEFAULT_STORE = process.env.STORE_ID || 'default';
+const MUSIC_DIR = path.resolve('./music');
+const DB_DIR = path.resolve('./data');
+const DB_PATH = path.join(DB_DIR, 'mvp.db');
+
+fs.mkdirSync(MUSIC_DIR, { recursive: true });
+fs.mkdirSync(DB_DIR, { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+/* ------------------ SCHEMA BASE ------------------ */
+db.exec(`
+CREATE TABLE IF NOT EXISTS tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  is_like INTEGER NOT NULL,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(track_id, client_id, store_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  track_id TEXT,
+  position_sec REAL,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT,
+  store_id TEXT DEFAULT '${DEFAULT_STORE}'
+);
+`);
+
+/* ------------------ MIGRAÇÕES IDEMPOTENTES ------------------ */
+/* Adiciona colunas store_id onde faltar (events/sessions) */
+try { db.exec(`ALTER TABLE events ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+try { db.exec(`ALTER TABLE sessions ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
+
+/* Recria a tabela likes caso ela ainda tenha UNIQUE(track_id,client_id) em vez do triplo */
+function migrateLikesUniqueTriplet() {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(likes)`).all();
+    const hasStore = cols.some(c => c.name === 'store_id');
+    // Verifica se já existe um índice único exatamente no triplo
+    const idxList = db.prepare(`PRAGMA index_list(likes)`).all();
+    let hasTriplet = false;
+    for (const idx of idxList) {
+      if (!idx.unique) continue;
+      const info = db.prepare(`PRAGMA index_info(${idx.name})`).all();
+      const names = info.map(r => r.name).join(',');
+      if (names === 'track_id,client_id,store_id') { hasTriplet = true; break; }
+    }
+    // Se não tem store_id ou não tem UNIQUE correto, recria a tabela
+    if (!hasStore || !hasTriplet) {
+      db.exec('BEGIN');
+      db.exec(`
+        CREATE TABLE likes_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          track_id TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          is_like INTEGER NOT NULL,
+          store_id TEXT DEFAULT '${DEFAULT_STORE}',
+          created_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(track_id, client_id, store_id)
+        );
+      `);
+      // Copia dados antigos (se não houver store_id na antiga, assume DEFAULT_STORE)
+      const hasStoreOld = hasStore;
+      if (hasStoreOld) {
+        db.exec(`INSERT OR IGNORE INTO likes_new (track_id, client_id, is_like, store_id, created_at)
+                 SELECT track_id, client_id, is_like, COALESCE(store_id,'${DEFAULT_STORE}'), created_at FROM likes;`);
+      } else {
+        db.exec(`INSERT OR IGNORE INTO likes_new (track_id, client_id, is_like, store_id, created_at)
+                 SELECT track_id, client_id, is_like, '${DEFAULT_STORE}', created_at FROM likes;`);
+      }
+      db.exec(`DROP TABLE likes;`);
+      db.exec(`ALTER TABLE likes_new RENAME TO likes;`);
+      db.exec('COMMIT');
+      console.log('[migrate] likes -> UNIQUE(track_id,client_id,store_id) aplicado');
+    }
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch {}
+    console.error('[migrate] falha ao migrar likes:', e);
+  }
+}
+migrateLikesUniqueTriplet();
+
+/* ------------------ PREPARED STATEMENTS ------------------ */
+const stmtInsertTrack = db.prepare(`INSERT INTO tracks (id, filename, artist, title) VALUES (@id, @filename, @artist, @title)`);
+const stmtAllTracks   = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`);
+const stmtFindTrack   = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
+const stmtUpsertLike  = db.prepare(`INSERT INTO likes (track_id, client_id, is_like, store_id) VALUES (?, ?, ?, ?)
+  ON CONFLICT(track_id, client_id, store_id) DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')`);
+const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec, store_id) VALUES (?, ?, ?, ?, ?)`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time, store_id) VALUES (?, ?, datetime('now'), ?)`);
+const stmtCloseSession= db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND store_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/public', express.static('public'));
+
+function stripExt(name) { return name.replace(/\.[^./\\]+$/,''); }
+function parseArtistTitleFromFilename(filename) {
+  const base = stripExt(filename).trim();
+  let artist = '', title = base;
+  const parts = base.split(' - ');
+  if (parts.length >= 2) { artist = parts.shift().trim(); title = parts.join(' - ').trim(); }
+  else { const idx = base.indexOf('-'); if (idx > 0) { artist = base.slice(0, idx).trim(); title = base.slice(idx+1).trim(); } }
+  return { artist, title };
+}
+function getStoreId(req) {
+  return (req.query.storeId || req.body?.storeId || req.headers['x-store-id'] || DEFAULT_STORE).toString();
+}
+
+/* ------------------ ROTAS ------------------ */
+app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
+app.get('/admin', adminAuth, (_, res) => res.sendFile(path.resolve('public/admin.html')));
+
+app.get('/api/tracks', (req, res) => {
+  const list = stmtAllTracks.all().map(t => {
+    let artist = t.artist, title = t.title;
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(t.filename);
+      artist = artist || d.artist || 'Artista';
+      title  = title  || d.title  || t.filename;
+    }
+    return { id: t.id, artist, title, url: `/audio/${t.id}` };
+  });
+  res.json(list);
+});
+
+app.get('/audio/:trackId', (req, res) => {
+  const t = stmtFindTrack.get(req.params.trackId);
+  if (!t) return res.status(404).send('Track not found');
+  const filePath = path.join(MUSIC_DIR, t.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File missing');
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  const contentType = mime.getType(filePath) || 'audio/mpeg';
+
+  if (range) {
+    const [startStr, endStr] = range.replace(/bytes=/,'').split('-');
+    const start = parseInt(startStr,10);
+    const end = endStr ? parseInt(endStr,10) : fileSize-1;
+    const file = fs.createReadStream(filePath, { start, end });
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': (end-start)+1,
+      'Content-Type': contentType
+    });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, { 'Content-Length': fileSize, 'Content-Type': contentType });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+/* Upload único */
+const upload = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.get('/upload', (_, res) => res.sendFile(path.resolve('public/upload.html')));
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo' });
+    const { originalname, path: tmpPath } = req.file;
+    let { artist = '', title = '' } = req.body || {};
+    if (!artist || !title) {
+      const d = parseArtistTitleFromFilename(originalname);
+      artist = artist || d.artist;
+      title  = title  || d.title;
+    }
+    const id = nanoid(12);
+    const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+    fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+    stmtInsertTrack.run({ id, filename: safeName, artist, title });
+    res.json({ ok: true, id, artist, title });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload' }); }
+});
+
+/* Upload em lote */
+app.get('/upload-batch', (_, res) => res.sendFile(path.resolve('public/upload-batch.html')));
+const uploadMany = multer({ dest: path.join(MUSIC_DIR, '_tmp') });
+app.post('/api/upload/batch', uploadMany.array('files', 100), (req, res) => {
+  try {
+    const results = [];
+    (req.files || []).forEach(f => {
+      const id = nanoid(12);
+      const { originalname, path: tmpPath } = f;
+      const meta = parseArtistTitleFromFilename(originalname);
+      const safeName = `${id}-${originalname.replace(/[^a-zA-Z0-9_. -]+/g, '_')}`;
+      fs.renameSync(tmpPath, path.join(MUSIC_DIR, safeName));
+      stmtInsertTrack.run({ id, filename: safeName, artist: meta.artist, title: meta.title });
+      results.push({ id, artist: meta.artist, title: meta.title, filename: safeName });
+    });
+    res.json({ ok: true, count: results.length, items: results });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Falha no upload em lote' }); }
+});
+
+/* Likes / estado */
+app.get('/api/like/state', (req, res) => {
+  const { trackId, clientId } = req.query || {};
+  const storeId = getStoreId(req);
+  if (!trackId || !clientId) return res.status(400).json({ error: 'Parâmetros inválidos' });
+  const row = db.prepare(`SELECT is_like FROM likes WHERE track_id=? AND client_id=? AND store_id=?`)
+                .get(trackId, clientId, storeId);
+  const state = row == null ? null : (row.is_like ? 'like' : 'dislike');
+  res.json({ state });
+});
+app.post('/api/like', (req, res) => {
+  const { trackId, clientId, like } = req.body || {};
+  const storeId = getStoreId(req);
+  if (!trackId || !clientId || typeof like !== 'boolean') return res.status(400).json({ error: 'Parâmetros inválidos' });
+  stmtUpsertLike.run(trackId, clientId, like ? 1 : 0, storeId);
+  res.json({ ok: true, state: like ? 'like' : 'dislike' });
+});
+
+/* Eventos / sessões */
+app.post('/api/events', (req, res) => {
+  const { clientId, type, trackId, positionSec } = req.body || {};
+  const storeId = getStoreId(req);
+  if (!clientId || !type) return res.status(400).json({ error: 'Parâmetros inválidos' });
+  const day = new Date().toISOString().slice(0,10);
+
+  if (type === 'play') {
+    const c = db.prepare(`
+      SELECT COUNT(*) c FROM events
+      WHERE client_id=? AND store_id=? AND event_type IN ('play','resume') AND DATE(created_at)=DATE('now')`)
+      .get(clientId, storeId).c;
+    if (c === 0) stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0, storeId);
+  }
+  if (type === 'play' || type === 'resume') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (!open) stmtOpenSession.run(clientId, day, storeId);
+  }
+  if (type === 'pause') {
+    const open = stmtGetOpenSess.get(clientId, day, storeId);
+    if (open) stmtCloseSession.run(open.id);
+  }
+  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0, storeId);
+  res.json({ ok: true });
+});
+
+/* Relatórios (inclui sessão aberta no total) */
+function computeTotalsWithLive(date, storeId) {
+  const sessions = db.prepare(`
+    SELECT start_time, end_time FROM sessions
+    WHERE DATE(start_time)=DATE(?) AND store_id=?`).all(date, storeId);
+  let total = 0;
+  for (const s of sessions) {
+    const start = new Date(s.start_time);
+    const end = s.end_time ? new Date(s.end_time) : new Date();
+    total += Math.max(0, (end - start) / 1000);
+  }
+  const evs = db.prepare(`
+    SELECT event_type type, COUNT(*) c FROM events
+    WHERE DATE(created_at)=DATE(?) AND store_id=? GROUP BY event_type`).all(date, storeId);
+  const eventsMap = evs.reduce((m,r)=> (m[r.type]=r.c, m), {});
+  const first = db.prepare(`
+    SELECT start_time FROM sessions
+    WHERE DATE(start_time)=DATE(?) AND store_id=?
+    ORDER BY start_time ASC LIMIT 1`).get(date, storeId);
+  return { totalSecondsPlayed: Math.round(total), events: eventsMap, dayStart: first?.start_time || null };
+}
+
+app.get('/api/report/daily', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const storeId = getStoreId(req);
+  const totals = computeTotalsWithLive(date, storeId);
+  const likes = db.prepare(`
+    SELECT t.id, t.artist, t.title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id AND l.store_id = ?
+    GROUP BY t.id
+    ORDER BY likes DESC`).all(storeId);
+  res.json({ date, storeId, totals, tracks: likes });
+});
+
+/* CSV por dia/loja */
+app.get('/api/report/csv', adminAuth, (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const storeId = getStoreId(req);
+  const rows = db.prepare(`
+    SELECT t.id as track_id, COALESCE(t.artist, '') as artist, COALESCE(t.title,'') as title,
+           SUM(CASE WHEN l.is_like = 1 THEN 1 ELSE 0 END) as likes,
+           SUM(CASE WHEN l.is_like = 0 THEN 1 ELSE 0 END) as dislikes
+    FROM tracks t
+    LEFT JOIN likes l ON l.track_id = t.id AND l.store_id = ?
+    GROUP BY t.id
+    ORDER BY likes DESC, dislikes ASC`).all(storeId);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="report_${storeId}_${date}.csv"`);
+  res.write('track_id,artist,title,likes,dislikes\n');
+  for (const r of rows) {
+    const esc = (s)=> `"${String(s??'').replace(/"/g,'""')}"`;
+    res.write([r.track_id, esc(r.artist), esc(r.title), r.likes||0, r.dislikes||0].join(',')+'\n');
+  }
+  res.end();
+});
+
+/* Lojas conhecidas e Now Playing */
+app.get('/api/stores', adminAuth, (_req, res) => {
+  const rows = db.prepare(`
+    SELECT store_id FROM (
+      SELECT store_id FROM likes
+      UNION
+      SELECT store_id FROM events
+      UNION
+      SELECT store_id FROM sessions
+    ) WHERE store_id IS NOT NULL AND store_id <> '' GROUP BY store_id ORDER BY store_id`).all();
+  const list = rows.map(r=>r.store_id);
+  if (!list.includes(DEFAULT_STORE)) list.unshift(DEFAULT_STORE);
+  res.json({ stores: [...new Set(list)] });
+});
+
+app.get('/api/now-playing', adminAuth, (req, res) => {
+  const storeId = getStoreId(req);
+  const row = db.prepare(`
+    SELECT e.track_id, e.created_at
+    FROM events e
+    WHERE e.store_id=? AND DATE(e.created_at)=DATE('now') AND e.event_type IN ('play','resume')
+    ORDER BY e.id DESC LIMIT 1
+  `).get(storeId);
+  if (!row) return res.json({ storeId, nowPlaying: null });
+  const t = row.track_id ? stmtFindTrack.get(row.track_id) : null;
+  let artist=null, title=null;
+  if (t) {
+    const meta = parseArtistTitleFromFilename(t.filename);
+    artist = t.artist || meta.artist || 'Artista';
+    title  = t.title  || meta.title  || t.filename;
+  }
+  res.json({ storeId, nowPlaying: row.track_id ? { trackId: row.track_id, artist, title, since: row.created_at } : null });
+});
+
+app.listen(PORT, () => console.log(`Player TI&CIA rodando na porta ${PORT}`));
