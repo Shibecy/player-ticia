@@ -50,7 +50,7 @@ async function fetchLikeState(){
 }
 
 async function loadTracks(){
-  const res = await fetch('/api/tracks');
+  const res = await fetch('/api/tracks?shuffle=true');
   tracks = await res.json();
   if (tracks.length) selectTrack(0);
 }
