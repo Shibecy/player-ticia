@@ -49,10 +49,28 @@ async function fetchLikeState(){
   setLikeUI(j.state || null);
 }
 
+function pickRandomIndex(excludeIndex = -1){
+  if (!tracks.length) return 0;
+  if (tracks.length === 1) return 0;
+  let next = Math.floor(Math.random() * tracks.length);
+  if (next === excludeIndex) {
+    next = (next + 1) % tracks.length;
+  }
+  return next;
+}
+
 async function loadTracks(){
-  const res = await fetch('/api/tracks');
-  tracks = await res.json();
-  if (tracks.length) selectTrack(0);
+  try {
+    const res = await fetch('/api/tracks?shuffle=true');
+    const data = await res.json();
+    tracks = Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error('Erro ao carregar faixas', err);
+    tracks = [];
+  }
+  if (tracks.length) {
+    selectTrack(pickRandomIndex());
+  }
 }
 
 function selectTrack(i){
@@ -69,15 +87,41 @@ function selectTrack(i){
 async function logEvent(type){
   const trackId = tracks[idx]?.id || null;
   const positionSec = audio.currentTime || 0;
-  await fetch('/api/events',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ clientId, type, trackId, positionSec, storeId })
-  });
+  try {
+    await fetch('/api/events',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ clientId, type, trackId, positionSec, storeId })
+    });
+  } catch (err) {
+    console.error('Erro ao enviar evento', err);
+  }
 }
 
-btnPlay.onclick = async ()=>{ await audio.play(); await logEvent('play'); };
+async function startPlayback(eventType='play'){
+  if (!tracks.length) return;
+  try {
+    await audio.play();
+  } catch (err) {
+    console.error('Erro ao iniciar reprodução', err);
+    return;
+  }
+  await logEvent(eventType);
+}
+
+async function playNextRandom(){
+  if (!tracks.length) return;
+  const nextIndex = pickRandomIndex(idx);
+  selectTrack(nextIndex);
+  await startPlayback('play');
+}
+
+function safePlayNextRandom(){
+  playNextRandom().catch(err => console.error('Erro ao avançar faixa', err));
+}
+
+btnPlay.onclick = ()=>{ startPlayback('play'); };
 btnPause.onclick = async ()=>{ audio.pause(); await logEvent('pause'); };
-btnNext.onclick = ()=>{ if(!tracks.length) return; selectTrack(idx+1); audio.play(); logEvent('resume'); };
+btnNext.onclick = ()=>{ safePlayNextRandom(); };
 
 async function rate(like){
   const trackId = tracks[idx]?.id; if(!trackId) return;
@@ -88,7 +132,7 @@ async function rate(like){
 btnLike.onclick = ()=> rate(true);
 btnDislike.onclick = ()=> rate(false);
 
-audio.addEventListener('ended', ()=>{ btnNext.click(); });
+audio.addEventListener('ended', ()=>{ safePlayNextRandom(); });
 audio.addEventListener('timeupdate', ()=>{
   elSeek.value = (audio.currentTime / (audio.duration||1)) * 100;
   elElapsed.textContent = fmt(audio.currentTime);

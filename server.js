@@ -5,7 +5,6 @@ import path from 'path';
 import fs from 'fs';
 import mime from 'mime';
 import { fileURLToPath } from 'url';
-import cookieParser from 'cookie-parser';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -97,11 +96,33 @@ const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, t
 const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time, store_id) VALUES (?, ?, datetime('now'), ?)`);
 const stmtCloseSession = db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
 const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND store_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
+const stmtGetLastEvent = db.prepare(`SELECT id, event_type, track_id, created_at FROM events WHERE client_id = ? AND store_id = ? ORDER BY id DESC LIMIT 1`);
+const stmtSecondsSince = db.prepare(`SELECT (strftime('%s', 'now') - strftime('%s', ?)) AS delta`);
 
 /* ================== MIDDLEWARES ================== */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
+
+app.use((req, _res, next) => {
+  const header = req.headers?.cookie;
+  const cookies = {};
+
+  if (header) {
+    header.split(';').forEach(part => {
+      const [name, ...rest] = part.trim().split('=');
+      if (!name) return;
+      const value = rest.join('=');
+      try {
+        cookies[name] = decodeURIComponent(value);
+      } catch {
+        cookies[name] = value;
+      }
+    });
+  }
+
+  req.cookies = cookies;
+  next();
+});
 
 function adminAuth(req, res, next) {
   const u = process.env.ADMIN_USER || 'admin';
@@ -241,8 +262,9 @@ app.post('/api/admin/scan', (req, res) => {
 app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
 
 app.get('/api/tracks', (req, res) => {
-  const shuffle = req.query.shuffle === 'true';
-  
+  const shuffleParam = typeof req.query.shuffle === 'string' ? req.query.shuffle.toLowerCase() : undefined;
+  const shouldShuffle = shuffleParam === undefined ? true : shuffleParam !== 'false';
+
   let list = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`).all().map(t => {
     let artist = t.artist, title = t.title;
     if (!artist || !title) {
@@ -253,10 +275,10 @@ app.get('/api/tracks', (req, res) => {
     return { id: t.id, artist, title, url: `/audio/${t.id}` };
   });
   
-  if (shuffle) {
+  if (shouldShuffle) {
     list = shuffleArray(list);
   }
-  
+
   res.json(list);
 });
 
@@ -326,13 +348,29 @@ app.post('/api/like', (req, res) => {
 app.post('/api/events', (req, res) => {
   const { clientId, type, trackId, positionSec } = req.body || {};
   const storeId = getStoreId(req);
-  
+
   if (!clientId || !type) {
     return res.status(400).json({ error: 'Parâmetros inválidos' });
   }
-  
+
+  const trackIdOrNull = trackId ? String(trackId) : null;
+
+  if (type === 'play') {
+    const last = stmtGetLastEvent.get(clientId, storeId);
+    if (last && last.event_type === 'play') {
+      const lastTrackId = last.track_id || null;
+      if (lastTrackId === trackIdOrNull) {
+        const deltaRow = stmtSecondsSince.get(last.created_at);
+        const delta = deltaRow && deltaRow.delta !== null ? Number(deltaRow.delta) : null;
+        if (delta !== null && !Number.isNaN(delta) && delta < 2) {
+          return res.json({ ok: true, skipped: true });
+        }
+      }
+    }
+  }
+
   const day = new Date().toISOString().slice(0, 10);
-  
+
   if (type === 'play') {
     const count = db.prepare(`
       SELECT COUNT(*) c FROM events 
@@ -342,7 +380,7 @@ app.post('/api/events', (req, res) => {
     `).get(clientId, storeId).c;
     
     if (count === 0) {
-      stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0, storeId);
+      stmtInsertEvent.run(clientId, 'first_play_of_day', trackIdOrNull, positionSec || 0, storeId);
     }
   }
   
@@ -356,7 +394,7 @@ app.post('/api/events', (req, res) => {
     if (open) stmtCloseSession.run(open.id);
   }
   
-  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0, storeId);
+  stmtInsertEvent.run(clientId, type, trackIdOrNull, positionSec || 0, storeId);
   res.json({ ok: true });
 });
 
@@ -518,7 +556,157 @@ app.post('/api/admin/track/delete', express.urlencoded({ extended: true }), (req
 app.get('/admin/tracks', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Player TI&CIA · Catálogo</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f7fa;padding:24px}.header{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}h1{font-size:28px;font-weight:700;color:#1a202c;margin-bottom:20px}.controls{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}input,select,button{padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px;font-family:inherit}input[type="text"]{flex:1;min-width:280px}button{background:#fff;cursor:pointer;transition:all 0.2s;font-weight:500}button:hover{background:#f7fafc}button.primary{background:#3182ce;color:#fff;border:none}button.success{background:#38a169;color:#fff;border:none}button.danger{background:#e53e3e;color:#fff;border:none}.table-wrap{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)}table{width:100%;border-collapse:collapse}thead{background:#edf2f7}th{padding:14px;text-align:left;font-weight:600;font-size:13px;color:#4a5568}td{padding:16px;border-bottom:1px solid #f7fafc;font-size:14px}tr:hover{background:#f7fafc}.badge{display:inline-block;background:#edf2f7;padding:4px 10px;border-radius:12px;font-size:12px}.muted{color:#a0aec0;font-size:13px}.pagination{display:flex;gap:16px;align-items:center;justify-content:center;padding:24px}.meta{text-align:center;color:#718096;padding:16px}</style></head><body><div class="header"><h1>🎵 Catálogo</h1><div class="controls"><select id="store"><option value="">Todas lojas</option><option value="itaipu">Itaipu</option><option value="macae">Macaé</option><option value="rio">Rio</option></select><input id="q" type="text" placeholder="Buscar..."/><label><input type="checkbox" id="onlyLikes"/> Likes</label><label><input type="checkbox" id="onlyDislikes"/> Dislikes</label><button class="primary" id="apply">Filtrar</button><button class="success" id="scan">Scan</button></div></div><div class="meta" id="meta"></div><div class="table-wrap"><table><thead><tr><th>Artista</th><th>Música</th><th>Loja</th><th>Métricas</th><th>Ações</th></tr></thead><tbody id="tbody"></tbody></table></div><div class="pagination"><button id="prev">←</button><span id="pageInfo"></span><button id="next">→</button></div><script>let limit=50,offset=0,total=0;function qs(){return new URLSearchParams(location.search)}async function load(){const p=qs();p.set('limit',limit);p.set('offset',offset);const r=await fetch('/api/admin/tracks.json?'+p,{credentials:'include'});if(!r.ok){alert('Erro');return}const js=await r.json();total=js.total||0;document.getElementById('meta').textContent='Total: '+total;document.getElementById('pageInfo').textContent='Pág '+(Math.floor(offset/limit)+1);const tb=document.getElementById('tbody');tb.innerHTML='';js.items.forEach(x=>{const tr=document.createElement('tr');tr.innerHTML='<td>'+x.artist+'</td><td>'+x.title+'<div class="muted">'+x.filename+'</div></td><td><span class="badge">'+x.store+'</span></td><td>❤️ '+x.likes+' 👎 '+x.dislikes+' ▶️ '+x.plays+'</td><td><button class="danger btn-del" data-id="'+x.id+'">Del</button></td>';tb.appendChild(tr)});document.querySelectorAll('.btn-del').forEach(b=>{b.onclick=async()=>{if(!confirm('Deletar?'))return;const fd=new FormData();fd.set('id',b.dataset.id);await fetch('/api/admin/track/delete',{method:'POST',body:fd,credentials:'include'});load()}})}document.getElementById('apply').onclick=()=>{offset=0;load()};document.getElementById('prev').onclick=()=>{offset=Math.max(0,offset-limit);load()};document.getElementById('next').onclick=()=>{if(offset+limit<total){offset+=limit;load()}};document.getElementById('scan').onclick=async()=>{await fetch('/api/admin/scan',{method:'POST',credentials:'include'});alert('Scan OK');load()};load()</script></body></html>`);
+<html lang="pt-BR"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Player TI&CIA · Catálogo</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f7fa;padding:24px}.header{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}h1{font-size:28px;font-weight:700;color:#1a202c;margin-bottom:20px}.controls{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}input,select,button{padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px;font-family:inherit}input[type="text"]{flex:1;min-width:280px}button{background:#fff;cursor:pointer;transition:all 0.2s;font-weight:500}button:hover{background:#f7fafc}button.primary{background:#3182ce;color:#fff;border:none}button.success{background:#38a169;color:#fff;border:none}button.danger{background:#e53e3e;color:#fff;border:none}.table-wrap{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)}table{width:100%;border-collapse:collapse}thead{background:#edf2f7}th{padding:14px;text-align:left;font-weight:600;font-size:13px;color:#4a5568}td{padding:16px;border-bottom:1px solid #f7fafc;font-size:14px}tr:hover{background:#f7fafc}.badge{display:inline-block;background:#edf2f7;padding:4px 10px;border-radius:12px;font-size:12px}.muted{color:#a0aec0;font-size:13px}.pagination{display:flex;gap:16px;align-items:center;justify-content:center;padding:24px}.meta{text-align:center;color:#718096;padding:16px}</style></head><body><div class="header"><h1>🎵 Catálogo</h1><div class="controls"><select id="store"><option value="">Todas lojas</option><option value="itaipu">Itaipu</option><option value="macae">Macaé</option><option value="rio">Rio</option></select><input id="q" type="text" placeholder="Buscar..."/><label><input type="checkbox" id="onlyLikes"/> Likes</label><label><input type="checkbox" id="onlyDislikes"/> Dislikes</label><button class="primary" id="apply">Filtrar</button><button class="success" id="scan">Scan</button></div></div><div class="meta" id="meta"></div><div class="table-wrap"><table><thead><tr><th>Artista</th><th>Música</th><th>Loja</th><th>Métricas</th><th>Ações</th></tr></thead><tbody id="tbody"></tbody></table></div><div class="pagination"><button id="prev">←</button><span id="pageInfo"></span><button id="next">→</button></div><script>
+    let limit = 50;
+    let offset = 0;
+    let total = 0;
+
+    const storeSelect = document.getElementById('store');
+    const inputQuery = document.getElementById('q');
+    const chkLikes = document.getElementById('onlyLikes');
+    const chkDislikes = document.getElementById('onlyDislikes');
+
+    const filters = {
+      q: '',
+      store: '',
+      onlyLikes: false,
+      onlyDislikes: false
+    };
+
+    function clampLimit(value) {
+      const parsed = parseInt(value, 10);
+      if (Number.isNaN(parsed)) return 50;
+      return Math.min(Math.max(parsed, 1), 200);
+    }
+
+    function clampOffset(value) {
+      const parsed = parseInt(value, 10);
+      if (Number.isNaN(parsed)) return 0;
+      return Math.max(parsed, 0);
+    }
+
+    function syncFromUrl() {
+      const params = new URLSearchParams(location.search);
+      filters.q = params.get('q') || '';
+      filters.store = params.get('store') || '';
+      filters.onlyLikes = params.get('onlyLikes') === '1';
+      filters.onlyDislikes = params.get('onlyDislikes') === '1';
+      limit = clampLimit(params.get('limit') || limit);
+      offset = clampOffset(params.get('offset') || offset);
+
+      inputQuery.value = filters.q;
+      if ([...storeSelect.options].some(opt => opt.value === filters.store)) {
+        storeSelect.value = filters.store;
+      } else {
+        storeSelect.value = '';
+      }
+      chkLikes.checked = filters.onlyLikes;
+      chkDislikes.checked = filters.onlyDislikes;
+    }
+
+    function applyFiltersFromInputs() {
+      filters.q = inputQuery.value.trim();
+      filters.store = storeSelect.value;
+      filters.onlyLikes = chkLikes.checked;
+      filters.onlyDislikes = chkDislikes.checked;
+    }
+
+    function buildQueryParams() {
+      const params = new URLSearchParams();
+      if (filters.q) params.set('q', filters.q);
+      if (filters.store) params.set('store', filters.store);
+      if (filters.onlyLikes) params.set('onlyLikes', '1');
+      if (filters.onlyDislikes) params.set('onlyDislikes', '1');
+      params.set('limit', String(limit));
+      params.set('offset', String(offset));
+      return params;
+    }
+
+    function updateUrl() {
+      const params = buildQueryParams();
+      const copy = new URLSearchParams(params);
+      if (limit === 50) copy.delete('limit');
+      if (offset === 0) copy.delete('offset');
+      const qs = copy.toString();
+      history.replaceState(null, '', qs ? location.pathname + '?' + qs : location.pathname);
+    }
+
+    async function load() {
+      const params = buildQueryParams();
+      const response = await fetch('/api/admin/tracks.json?' + params.toString(), { credentials: 'include' });
+      if (!response.ok) {
+        alert('Erro ao carregar lista');
+        return;
+      }
+
+      const js = await response.json();
+      total = js.total || 0;
+      document.getElementById('meta').textContent = 'Total: ' + total;
+      document.getElementById('pageInfo').textContent = 'Pág ' + (Math.floor(offset / limit) + 1);
+
+      const tb = document.getElementById('tbody');
+      tb.innerHTML = '';
+      js.items.forEach(x => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + x.artist + '</td><td>' + x.title + '<div class="muted">' + x.filename + '</div></td><td><span class="badge">' + x.store + '</span></td><td>❤️ ' + x.likes + ' 👎 ' + x.dislikes + ' ▶️ ' + x.plays + '</td><td><button class="danger btn-del" data-id="' + x.id + '">Del</button></td>';
+        tb.appendChild(tr);
+      });
+
+      document.querySelectorAll('.btn-del').forEach(b => {
+        b.onclick = async () => {
+          if (!confirm('Deletar?')) return;
+
+          const body = new URLSearchParams();
+          body.set('id', b.dataset.id);
+
+          const resp = await fetch('/api/admin/track/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+            credentials: 'include'
+          });
+
+          const result = await resp.json().catch(() => ({ ok: false }));
+          if (!resp.ok || !result.ok) {
+            alert(result && result.error ? result.error : 'Erro ao deletar');
+            return;
+          }
+
+          load();
+        };
+      });
+
+      updateUrl();
+    }
+
+    document.getElementById('apply').onclick = () => {
+      applyFiltersFromInputs();
+      offset = 0;
+      load();
+    };
+
+    document.getElementById('prev').onclick = () => {
+      if (offset === 0) return;
+      offset = Math.max(0, offset - limit);
+      load();
+    };
+
+    document.getElementById('next').onclick = () => {
+      if (offset + limit >= total) return;
+      offset += limit;
+      load();
+    };
+
+    document.getElementById('scan').onclick = async () => {
+      await fetch('/api/admin/scan', { method: 'POST', credentials: 'include' });
+      alert('Scan OK');
+      load();
+    };
+
+    syncFromUrl();
+    applyFiltersFromInputs();
+    load();
+  </script></body></html>`);
 });
 
 app.get('/admin/overview', (req, res) => {
