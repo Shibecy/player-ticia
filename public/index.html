@@ -3,27 +3,41 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Player de Música TI&CIA" />
   <title>Player TI&CIA</title>
   <link rel="stylesheet" href="/public/styles.css" />
+  <!-- Evitar cache do JavaScript -->
+  <script>
+    // Limpar cache ao carregar (útil durante desenvolvimento)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        for(let registration of registrations) {
+          registration.unregister();
+        }
+      });
+    }
+  </script>
 </head>
 <body>
   <header class="header">
     <img src="http://tiecia.com.br/player/logo.png" alt="TI&CIA" class="logo" />
   </header>
-
+  
   <main class="container">
     <section class="now-playing">
       <div id="track-meta">
         <div class="artist" id="artist">–</div>
-        <div class="title" id="title">Selecione uma faixa</div>
+        <div class="title" id="title">Carregando músicas...</div>
       </div>
+      
       <div class="controls">
-        <button id="btn-play"   class="btn">▶︎</button>
-        <button id="btn-pause"  class="btn">⏸</button>
-        <button id="btn-next"   class="btn">⏭</button>
-        <button id="btn-like"   class="btn">👍</button>
-        <button id="btn-dislike" class="btn">👎</button>
+        <button id="btn-play" class="btn" title="Tocar">▶︎</button>
+        <button id="btn-pause" class="btn" title="Pausar">⏸</button>
+        <button id="btn-next" class="btn" title="Próxima">⏭</button>
+        <button id="btn-like" class="btn" title="Gostei">👍</button>
+        <button id="btn-dislike" class="btn" title="Não gostei">👎</button>
       </div>
+      
       <div class="progress">
         <span id="elapsed">0:00</span>
         <input type="range" id="seek" min="0" max="100" value="0" />
@@ -31,8 +45,10 @@
       </div>
     </section>
   </main>
-
-  <audio id="audio"></audio>
-  <script src="/public/app.js"></script>
+  
+  <audio id="audio" preload="metadata"></audio>
+  
+  <!-- JavaScript do player - adiciona timestamp para evitar cache -->
+  <script src="/public/app.js?v=2024111401"></script>
 </body>
 </html>
