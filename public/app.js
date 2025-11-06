@@ -50,8 +50,15 @@ async function fetchLikeState(){
 }
 
 async function loadTracks(){
-  const res = await fetch('/api/tracks');
-  tracks = await res.json();
+  try {
+    const params = new URLSearchParams({ storeId });
+    const res = await fetch(`/api/tracks?${params.toString()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    tracks = await res.json();
+  } catch (err) {
+    console.error('Falha ao carregar faixas:', err);
+    tracks = [];
+  }
   if (tracks.length) selectTrack(0);
 }
 
@@ -75,9 +82,25 @@ async function logEvent(type){
   });
 }
 
-btnPlay.onclick = async ()=>{ await audio.play(); await logEvent('play'); };
+btnPlay.onclick = async ()=>{
+  try {
+    await audio.play();
+    await logEvent('play');
+  } catch (err) {
+    console.warn('Reprodução bloqueada:', err);
+  }
+};
 btnPause.onclick = async ()=>{ audio.pause(); await logEvent('pause'); };
-btnNext.onclick = ()=>{ if(!tracks.length) return; selectTrack(idx+1); audio.play(); logEvent('resume'); };
+btnNext.onclick = async ()=>{
+  if(!tracks.length) return;
+  selectTrack(idx+1);
+  try {
+    await audio.play();
+    await logEvent('resume');
+  } catch (err) {
+    console.warn('Reprodução bloqueada:', err);
+  }
+};
 
 async function rate(like){
   const trackId = tracks[idx]?.id; if(!trackId) return;
