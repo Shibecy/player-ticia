@@ -17,7 +17,6 @@ const MUSIC_DIR = path.resolve('./music');
 const DB_DIR = path.resolve('./data');
 const DB_PATH = path.join(DB_DIR, 'mvp.db');
 
-// Criar diretórios
 fs.mkdirSync(MUSIC_DIR, { recursive: true });
 fs.mkdirSync(DB_DIR, { recursive: true });
 
@@ -81,7 +80,6 @@ CREATE TABLE IF NOT EXISTS playtime_daily (
 );
 `);
 
-// Migrações (adicionar colunas se não existirem)
 try { db.exec(`ALTER TABLE tracks ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
 try { db.exec(`ALTER TABLE events ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
 try { db.exec(`ALTER TABLE sessions ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_STORE}'`); } catch {}
@@ -105,7 +103,6 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Basic Auth para admin
 function adminAuth(req, res, next) {
   const u = process.env.ADMIN_USER || 'admin';
   const p = process.env.ADMIN_PASS || 'changeme';
@@ -162,11 +159,11 @@ function sanitize(str) {
 }
 
 function getStoreId(req) {
-  return sanitize(req.query.storeId || req.query.store || req.body?.storeId || req.body?.store || req.headers['x-store-id'] || DEFAULT_STORE);
+  return sanitize(req.query.storeId || req.query.store || (req.body && req.body.storeId) || (req.body && req.body.store) || req.headers['x-store-id'] || DEFAULT_STORE);
 }
 
 function getClientId(req, res) {
-  let clientId = req.cookies?.clientId;
+  let clientId = req.cookies && req.cookies.clientId;
   if (!clientId) {
     clientId = nanoid(16);
     res.cookie('clientId', clientId, { maxAge: 365 * 24 * 60 * 60 * 1000, httpOnly: true });
@@ -213,7 +210,6 @@ app.post('/api/admin/scan', (req, res) => {
       }
     }
 
-    // Limpar banco de arquivos deletados
     const allTracks = db.prepare(`SELECT id, filename FROM tracks`).all();
     let removed = 0;
     
@@ -244,7 +240,6 @@ app.post('/api/admin/scan', (req, res) => {
 /* ================== ROTAS PÚBLICAS ================== */
 app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
 
-// Listar faixas (com randomização)
 app.get('/api/tracks', (req, res) => {
   const shuffle = req.query.shuffle === 'true';
   
@@ -255,15 +250,9 @@ app.get('/api/tracks', (req, res) => {
       artist = artist || d.artist || 'Artista';
       title = title || d.title || t.filename;
     }
-    return { 
-      id: t.id, 
-      artist, 
-      title, 
-      url: `/audio/${t.id}` 
-    };
+    return { id: t.id, artist, title, url: `/audio/${t.id}` };
   });
   
-  // 🎲 RANDOMIZAR PLAYLIST
   if (shuffle) {
     list = shuffleArray(list);
   }
@@ -271,7 +260,6 @@ app.get('/api/tracks', (req, res) => {
   res.json(list);
 });
 
-// Stream de áudio
 app.get('/audio/:trackId', (req, res) => {
   const t = stmtFindTrack.get(req.params.trackId);
   if (!t) return res.status(404).send('Track not found');
@@ -306,7 +294,6 @@ app.get('/audio/:trackId', (req, res) => {
   }
 });
 
-// Sistema de feedback
 app.get('/api/like/state', (req, res) => {
   const { trackId, clientId } = req.query || {};
   const storeId = getStoreId(req);
@@ -336,7 +323,6 @@ app.post('/api/like', (req, res) => {
   res.json({ ok: true, state: like ? 'like' : 'dislike' });
 });
 
-// Eventos
 app.post('/api/events', (req, res) => {
   const { clientId, type, trackId, positionSec } = req.body || {};
   const storeId = getStoreId(req);
@@ -374,7 +360,6 @@ app.post('/api/events', (req, res) => {
   res.json({ ok: true });
 });
 
-// Heartbeat (60s)
 app.post('/api/heartbeat', (req, res) => {
   try {
     const storeId = getStoreId(req);
@@ -434,7 +419,6 @@ app.post('/api/heartbeat', (req, res) => {
 /* ================== ADMIN ================== */
 app.get('/admin', (_, res) => res.sendFile(path.resolve('public/admin.html')));
 
-// Console: listar músicas com filtros e métricas por loja
 app.get('/api/admin/tracks.json', (req, res) => {
   try {
     const q = sanitize(req.query.q || '');
@@ -482,7 +466,6 @@ app.get('/api/admin/tracks.json', (req, res) => {
     
     const items = db.prepare(sql).all(...params);
     
-    // Métricas detalhadas por loja para cada faixa
     const itemsWithStoreMetrics = items.map(item => {
       const storeMetrics = db.prepare(`
         SELECT 
@@ -506,7 +489,6 @@ app.get('/api/admin/tracks.json', (req, res) => {
   }
 });
 
-// Deletar faixa
 app.post('/api/admin/track/delete', express.urlencoded({ extended: true }), (req, res) => {
   try {
     const id = sanitize(req.body.id || '');
@@ -515,12 +497,10 @@ app.post('/api/admin/track/delete', express.urlencoded({ extended: true }), (req
     const row = db.prepare(`SELECT id, filename FROM tracks WHERE id = ?`).get(id);
     if (!row) return res.status(404).json({ ok: false, error: 'not found' });
     
-    // Remover dados
     db.prepare(`DELETE FROM likes WHERE track_id = ?`).run(id);
     db.prepare(`DELETE FROM events WHERE track_id = ?`).run(id);
     db.prepare(`DELETE FROM tracks WHERE id = ?`).run(id);
     
-    // Remover arquivo
     try {
       const filePath = path.join(MUSIC_DIR, row.filename);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -535,435 +515,17 @@ app.post('/api/admin/track/delete', express.urlencoded({ extended: true }), (req
   }
 });
 
-// Interface web
 app.get('/admin/tracks', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(`<!doctype html>
-<html lang="pt-BR"><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Player TI&CIA · Catálogo</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,sans-serif;background:#f5f7fa;padding:24px}
-.header{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
-h1{font-size:28px;font-weight:700;color:#1a202c;margin-bottom:20px;display:flex;align-items:center;gap:12px}
-.controls{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
-input,select,button{padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px;font-family:inherit}
-input[type="text"]{flex:1;min-width:280px}
-input[type="checkbox"]{width:auto;margin-right:6px}
-button{background:#fff;cursor:pointer;transition:all 0.2s;font-weight:500;border:1px solid #cbd5e0}
-button:hover{background:#f7fafc;transform:translateY(-1px);box-shadow:0 2px 4px rgba(0,0,0,0.1)}
-button.primary{background:#3182ce;color:#fff;border:none}
-button.primary:hover{background:#2c5282}
-button.success{background:#38a169;color:#fff;border:none}
-button.success:hover{background:#2f855a}
-button.danger{background:#e53e3e;color:#fff;border:none}
-button.danger:hover{background:#c53030}
-.hint{color:#718096;font-size:13px;margin-top:12px}
-kbd{background:#edf2f7;border:1px solid #cbd5e0;border-radius:4px;padding:2px 6px;font-size:11px;font-family:monospace;color:#4a5568}
-.table-wrap{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
-table{width:100%;border-collapse:collapse}
-thead{background:#edf2f7;border-bottom:2px solid #cbd5e0}
-th{padding:14px 16px;text-align:left;font-weight:600;font-size:13px;color:#4a5568;text-transform:uppercase;letter-spacing:0.5px}
-td{padding:16px;border-bottom:1px solid #f7fafc;font-size:14px}
-tr:hover{background:#f7fafc}
-.badge{display:inline-block;background:#edf2f7;color:#4a5568;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:500}
-.badge.itaipu{background:#ebf8ff;color:#2c5282}
-.badge.macae{background:#f0fff4;color:#276749}
-.badge.rio{background:#fef5e7;color:#975a16}
-.muted{color:#a0aec0;font-size:13px}
-.metrics{display:flex;gap:16px;margin-top:6px}
-.metric{font-size:13px;color:#718096}
-.metric strong{color:#2d3748;font-weight:600}
-.metric.likes strong{color:#38a169}
-.metric.dislikes strong{color:#e53e3e}
-.metric.plays strong{color:#3182ce}
-.store-detail{margin-top:8px;padding:8px;background:#f7fafc;border-radius:6px;font-size:12px;color:#4a5568}
-.store-item{display:inline-flex;align-items:center;gap:8px;margin-right:16px}
-.pagination{display:flex;gap:16px;align-items:center;justify-content:center;padding:24px;background:#fff;border-radius:12px;margin-top:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
-.meta{text-align:center;color:#718096;padding:16px;font-size:14px}
-.actions{display:flex;gap:8px}
-.empty{text-align:center;padding:60px 20px;color:#a0aec0}
-.empty-icon{font-size:48px;margin-bottom:16px}
-</style>
-</head>
-<body>
-<div class="header">
-  <h1>🎵 Catálogo de Músicas</h1>
-  <div class="controls">
-    <select id="store">
-      <option value="">📍 Todas as lojas</option>
-      <option value="itaipu">Itaipu</option>
-      <option value="macae">Macaé</option>
-      <option value="rio">Rio</option>
-      <option value="default">Default</option>
-    </select>
-    <input id="q" type="text" placeholder="🔍 Buscar artista, música ou arquivo..."/>
-    <label style="display:flex;align-items:center;white-space:nowrap">
-      <input type="checkbox" id="onlyLikes"/> Apenas com ❤️ likes
-    </label>
-    <label style="display:flex;align-items:center;white-space:nowrap">
-      <input type="checkbox" id="onlyDislikes"/> Apenas com 👎 dislikes
-    </label>
-    <button class="primary" id="apply">Aplicar Filtros</button>
-    <button class="success" id="scan">🔄 Scan SFTP</button>
-  </div>
-  <div class="hint">
-    💡 Dicas: <kbd>Enter</kbd> aplica filtros · <kbd>PgUp</kbd>/<kbd>PgDn</kbd> navega páginas · Envie arquivos via SFTP para ./music/
-  </div>
-</div>
-
-<div class="meta" id="meta">Carregando...</div>
-
-<div class="table-wrap">
-  <table>
-    <thead><tr>
-      <th style="width:22%">Artista</th>
-      <th style="width:24%">Música</th>
-      <th style="width:10%">Loja</th>
-      <th style="width:28%">Métricas</th>
-      <th style="width:16%">Ações</th>
-    </tr></thead>
-    <tbody id="tbody"></tbody>
-  </table>
-</div>
-
-<div class="pagination">
-  <button id="prev">← Anterior</button>
-  <span id="pageInfo" class="muted"></span>
-  <button id="next">Próxima →</button>
-</div>
-
-<script>
-let limit = 50, offset = 0, total = 0;
-
-function qs() { return new URLSearchParams(location.search); }
-
-function setQS(o) {
-  const p = qs();
-  Object.entries(o).forEach(([k, v]) => {
-    if (v === null || v === undefined || v === '') p.delete(k);
-    else p.set(k, v);
-  });
-  history.replaceState(null, '', '?' + p.toString());
-}
-
-function applyFromQS() {
-  const p = qs();
-  document.getElementById('store').value = p.get('store') || '';
-  document.getElementById('q').value = p.get('q') || '';
-  document.getElementById('onlyLikes').checked = p.get('onlyLikes') === '1';
-  document.getElementById('onlyDislikes').checked = p.get('onlyDislikes') === '1';
-  offset = parseInt(p.get('offset') || '0', 10) || 0;
-}
-
-async function load() {
-  applyFromQS();
-  const p = new URLSearchParams(qs());
-  p.set('limit', limit);
-  p.set('offset', offset);
-  
-  const r = await fetch('/api/admin/tracks.json?' + p.toString(), { credentials: 'include' });
-  if (!r.ok) {
-    alert('❌ Falha ao carregar: ' + r.status);
-    return;
-  }
-  
-  const js = await r.json();
-  total = js.total || 0;
-  
-  document.getElementById('meta').textContent = 
-    \`📊 Total: \${total} músicas no catálogo | Exibindo \${js.items.length} resultados\`;
-  
-  document.getElementById('pageInfo').textContent = 
-    \`Página \${Math.floor(offset / limit) + 1} de \${Math.max(1, Math.ceil(total / limit))}\`;
-  
-  const tb = document.getElementById('tbody');
-  tb.innerHTML = '';
-  
-  if (!js.items || js.items.length === 0) {
-    tb.innerHTML = '<tr><td colspan="5" class="empty"><div class="empty-icon">🎵</div><div>Nenhuma música encontrada</div><div class="muted" style="margin-top:8px">Envie arquivos via SFTP ou ajuste os filtros</div></td></tr>';
-    return;
-  }
-  
-  js.items.forEach(x => {
-    const tr = document.createElement('tr');
-    
-    let storeDetails = '';
-    if (x.storeMetrics && x.storeMetrics.length > 0) {
-      const details = x.storeMetrics.map(sm => 
-        \`<span class="store-item"><span class="badge \${sm.store_id}">\${sm.store_id}</span> ❤️ \${sm.likes || 0} · 👎 \${sm.dislikes || 0}</span>\`
-      ).join('');
-      storeDetails = \`<div class="store-detail">📍 Por loja: \${details}</div>\`;
-    }
-    
-    tr.innerHTML = \`
-      <td><strong>\${x.artist || 'Sem artista'}</strong></td>
-      <td>
-        <div>\${x.title || 'Sem título'}</div>
-        <div class="muted">\${x.filename || ''}</div>
-      </td>
-      <td><span class="badge \${x.store}">\${x.store || 'default'}</span></td>
-      <td>
-        <div class="metrics">
-          <span class="metric likes">❤️ <strong>\${x.likes || 0}</strong> likes</span>
-          <span class="metric dislikes">👎 <strong>\${x.dislikes || 0}</strong> dislikes</span>
-          <span class="metric plays">▶️ <strong>\${x.plays || 0}</strong> plays</span>
-        </div>
-        \${storeDetails}
-      </td>
-      <td>
-        <div class="actions">
-          <button class="danger btn-delete" data-id="\${x.id}" data-name="\${x.artist} - \${x.title}">🗑️ Excluir</button>
-        </div>
-      </td>
-    \`;
-    tb.appendChild(tr);
-  });
-  
-  document.querySelectorAll('.btn-delete').forEach(btn => {
-    btn.onclick = async () => {
-      const id = btn.getAttribute('data-id');
-      const name = btn.getAttribute('data-name');
-      
-      if (!confirm(\`⚠️ Excluir "\${name}"?\\n\\nIsso irá remover:\\n• Arquivo físico\\n• Todos os likes/dislikes\\n• Histórico de eventos\\n\\nEsta ação não pode ser desfeita!\`)) return;
-      
-      btn.disabled = true;
-      btn.textContent = '⏳ Excluindo...';
-      
-      const fd = new FormData();
-      fd.set('id', id);
-      
-      const r = await fetch('/api/admin/track/delete', {
-        method: 'POST',
-        body: fd,
-        credentials: 'include'
-      });
-      
-      if (!r.ok) {
-        alert('❌ Falha ao excluir');
-        btn.disabled = false;
-        btn.textContent = '🗑️ Excluir';
-        return;
-      }
-      
-      const result = await r.json();
-      alert(result.message || '✅ Faixa excluída com sucesso!');
-      load();
-    };
-  });
-}
-
-document.getElementById('scan').onclick = async () => {
-  const btn = document.getElementById('scan');
-  btn.disabled = true;
-  btn.textContent = '⏳ Scaneando...';
-  
-  const r = await fetch('/api/admin/scan', {
-    method: 'POST',
-    credentials: 'include'
-  });
-  
-  if (!r.ok) {
-    alert('❌ Falha no scan');
-    btn.disabled = false;
-    btn.textContent = '🔄 Scan SFTP';
-    return;
-  }
-  
-  const js = await r.json();
-  alert(js.message || '✅ Scan completo!');
-  btn.disabled = false;
-  btn.textContent = '🔄 Scan SFTP';
-  load();
-};
-
-document.getElementById('apply').onclick = () => {
-  offset = 0;
-  setQS({
-    store: document.getElementById('store').value.trim(),
-    q: document.getElementById('q').value.trim(),
-    onlyLikes: document.getElementById('onlyLikes').checked ? '1' : null,
-    onlyDislikes: document.getElementById('onlyDislikes').checked ? '1' : null,
-    offset: '0'
-  });
-  load();
-};
-
-document.getElementById('q').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    document.getElementById('apply').click();
-  }
+  res.send(`<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Player TI&CIA · Catálogo</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f7fa;padding:24px}.header{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}h1{font-size:28px;font-weight:700;color:#1a202c;margin-bottom:20px}.controls{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}input,select,button{padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px;font-family:inherit}input[type="text"]{flex:1;min-width:280px}button{background:#fff;cursor:pointer;transition:all 0.2s;font-weight:500}button:hover{background:#f7fafc}button.primary{background:#3182ce;color:#fff;border:none}button.success{background:#38a169;color:#fff;border:none}button.danger{background:#e53e3e;color:#fff;border:none}.table-wrap{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)}table{width:100%;border-collapse:collapse}thead{background:#edf2f7}th{padding:14px;text-align:left;font-weight:600;font-size:13px;color:#4a5568}td{padding:16px;border-bottom:1px solid #f7fafc;font-size:14px}tr:hover{background:#f7fafc}.badge{display:inline-block;background:#edf2f7;padding:4px 10px;border-radius:12px;font-size:12px}.muted{color:#a0aec0;font-size:13px}.pagination{display:flex;gap:16px;align-items:center;justify-content:center;padding:24px}.meta{text-align:center;color:#718096;padding:16px}</style></head><body><div class="header"><h1>🎵 Catálogo</h1><div class="controls"><select id="store"><option value="">Todas lojas</option><option value="itaipu">Itaipu</option><option value="macae">Macaé</option><option value="rio">Rio</option></select><input id="q" type="text" placeholder="Buscar..."/><label><input type="checkbox" id="onlyLikes"/> Likes</label><label><input type="checkbox" id="onlyDislikes"/> Dislikes</label><button class="primary" id="apply">Filtrar</button><button class="success" id="scan">Scan</button></div></div><div class="meta" id="meta"></div><div class="table-wrap"><table><thead><tr><th>Artista</th><th>Música</th><th>Loja</th><th>Métricas</th><th>Ações</th></tr></thead><tbody id="tbody"></tbody></table></div><div class="pagination"><button id="prev">←</button><span id="pageInfo"></span><button id="next">→</button></div><script>let limit=50,offset=0,total=0;function qs(){return new URLSearchParams(location.search)}async function load(){const p=qs();p.set('limit',limit);p.set('offset',offset);const r=await fetch('/api/admin/tracks.json?'+p,{credentials:'include'});if(!r.ok){alert('Erro');return}const js=await r.json();total=js.total||0;document.getElementById('meta').textContent='Total: '+total;document.getElementById('pageInfo').textContent='Pág '+(Math.floor(offset/limit)+1);const tb=document.getElementById('tbody');tb.innerHTML='';js.items.forEach(x=>{const tr=document.createElement('tr');tr.innerHTML='<td>'+x.artist+'</td><td>'+x.title+'<div class="muted">'+x.filename+'</div></td><td><span class="badge">'+x.store+'</span></td><td>❤️ '+x.likes+' 👎 '+x.dislikes+' ▶️ '+x.plays+'</td><td><button class="danger btn-del" data-id="'+x.id+'">Del</button></td>';tb.appendChild(tr)});document.querySelectorAll('.btn-del').forEach(b=>{b.onclick=async()=>{if(!confirm('Deletar?'))return;const fd=new FormData();fd.set('id',b.dataset.id);await fetch('/api/admin/track/delete',{method:'POST',body:fd,credentials:'include'});load()}})}document.getElementById('apply').onclick=()=>{offset=0;load()};document.getElementById('prev').onclick=()=>{offset=Math.max(0,offset-limit);load()};document.getElementById('next').onclick=()=>{if(offset+limit<total){offset+=limit;load()}};document.getElementById('scan').onclick=async()=>{await fetch('/api/admin/scan',{method:'POST',credentials:'include'});alert('Scan OK');load()};load()</script></body></html>`);
 });
 
-document.getElementById('prev').onclick = () => {
-  offset = Math.max(0, offset - limit);
-  setQS({ offset: String(offset) });
-  load();
-};
-
-document.getElementById('next').onclick = () => {
-  if (offset + limit < total) {
-    offset += limit;
-    setQS({ offset: String(offset) });
-    load();
-  }
-};
-
-window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.key === 'PageDown') {
-    e.preventDefault();
-    document.getElementById('next').click();
-  }
-  if (e.key === 'PageUp') {
-    e.preventDefault();
-    document.getElementById('prev').click();
-  }
-});
-
-load();
-</script>
-</body>
-</html>\`);
-});
-
-// Overview dashboard
 app.get('/admin/overview', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(\`<!doctype html>
-<html lang="pt-BR"><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Player TI&CIA · Overview</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f7fa;padding:24px}
-h1{font-size:28px;font-weight:700;color:#1a202c;margin-bottom:24px}
-.controls{background:#fff;border-radius:12px;padding:20px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
-.row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
-select,input,button{padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}
-button{background:#fff;cursor:pointer;transition:all 0.2s;font-weight:500}
-button:hover{background:#f7fafc}
-button.primary{background:#3182ce;color:#fff;border:none}
-.cards{display:grid;gap:20px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
-.card{background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
-.card-title{font-size:18px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-.status{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px}
-.status.playing{background:#38a169;animation:pulse 2s infinite}
-.status.paused{background:#ed8936}
-.status.offline{background:#e53e3e}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-.metric{margin:8px 0;font-size:14px;color:#4a5568}
-.metric strong{color:#2d3748;font-weight:600}
-.muted{color:#a0aec0;font-size:13px}
-a{color:#3182ce;text-decoration:none}
-a:hover{text-decoration:underline}
-</style>
-</head>
-<body>
-<h1>📊 Overview dos Players</h1>
-<div class="controls">
-  <div class="row">
-    <label>Lojas:
-      <select id="stores" multiple size="4">
-        <option value="itaipu" selected>Itaipu</option>
-        <option value="macae" selected>Macaé</option>
-        <option value="rio" selected>Rio</option>
-        <option value="default">Default</option>
-      </select>
-    </label>
-    <label>Auto-refresh:
-      <select id="refresh">
-        <option value="0">Desligado</option>
-        <option value="5">5s</option>
-        <option value="10" selected>10s</option>
-        <option value="30">30s</option>
-        <option value="60">60s</option>
-      </select>
-    </label>
-  </div>
-</div>
-
-<div id="date" class="muted" style="margin-bottom:16px"></div>
-<div class="cards" id="cards"></div>
-
-<script>
-let timer = null;
-
-function getSelectedStores() {
-  const sel = document.getElementById('stores');
-  return Array.from(sel.selectedOptions).map(o => o.value);
-}
-
-function statusHTML(s) {
-  if (s === 'playing') return '<span class="status playing"></span>▶️ Tocando';
-  if (s === 'paused') return '<span class="status paused"></span>⏸️ Pausado';
-  return '<span class="status offline"></span>⭕ Offline';
-}
-
-async function load() {
-  const stores = getSelectedStores();
-  const qs = new URLSearchParams();
-  if (stores.length) qs.set('stores', stores.join(','));
-  
-  const r = await fetch('/api/admin/overview_json?' + qs.toString(), { credentials: 'include' });
-  if (!r.ok) {
-    alert('❌ Falha ao carregar: ' + r.status);
-    return;
-  }
-  
-  const js = await r.json();
-  document.getElementById('date').textContent = '📅 Data: ' + (js.date || '');
-  
-  const cards = document.getElementById('cards');
-  cards.innerHTML = '';
-  
-  (js.items || []).forEach(x => {
-    const now = x.now_playing 
-      ? \`<strong>\${x.now_playing.artist || ''}</strong> — \${x.now_playing.title || ''}\`
-      : '<em class="muted">Nenhuma música</em>';
-    
-    const div = document.createElement('div');
-    div.className = 'card';
-    div.innerHTML = \`
-      <div class="card-title">🏪 \${x.store}</div>
-      <div style="margin:12px 0">\${statusHTML(x.status)}</div>
-      <div class="metric">🎵 Agora: \${now}</div>
-      <div class="metric">🕐 Primeiro play: \${x.first_play_today || '—'}</div>
-      <div class="metric">▶️ Plays hoje: <strong>\${x.metrics_today.plays}</strong></div>
-      <div class="metric">❤️ Likes hoje: <strong>\${x.metrics_today.likes}</strong></div>
-      <div class="metric">👎 Dislikes hoje: <strong>\${x.metrics_today.dislikes}</strong></div>
-      <div class="muted" style="margin-top:12px;font-size:12px">
-        Última atualização: \${x.last_seen || '—'}
-      </div>
-      <div style="margin-top:12px">
-        <a href="/?store=\${encodeURIComponent(x.store)}" target="_blank">🔗 Abrir player</a>
-      </div>
-    \`;
-    cards.appendChild(div);
-  });
-}
-
-document.getElementById('refresh').onchange = (e) => {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-  }
-  const s = parseInt(e.target.value, 10);
-  if (s > 0) timer = setInterval(load, s * 1000);
-};
-
-load();
-document.getElementById('refresh').dispatchEvent(new Event('change'));
-</script>
-</body>
-</html>\`);
+  res.send(`<!doctype html><html><head><meta charset="utf-8"/><title>Overview</title><style>body{font-family:sans-serif;padding:24px}.cards{display:grid;gap:20px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}.card{background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.1)}.status{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px}.status.playing{background:#38a169}.status.paused{background:#ed8936}.status.offline{background:#e53e3e}</style></head><body><h1>📊 Overview</h1><div id="cards"></div><script>async function load(){const r=await fetch('/api/admin/overview_json?stores=itaipu,macae,rio',{credentials:'include'});const js=await r.json();const cards=document.getElementById('cards');cards.innerHTML='';js.items.forEach(x=>{const now=x.now_playing?(x.now_playing.artist+' - '+x.now_playing.title):'—';const st=x.status==='playing'?'playing':(x.status==='paused'?'paused':'offline');cards.innerHTML+='<div class="card"><h3>'+x.store+'</h3><div><span class="status '+st+'"></span>'+x.status+'</div><div>🎵 '+now+'</div><div>▶️ '+x.metrics_today.plays+' plays</div><div>❤️ '+x.metrics_today.likes+' likes</div></div>'})}setInterval(load,10000);load()</script></body></html>`);
 });
 
-// Overview JSON API
 app.get('/api/admin/overview_json', (req, res) => {
   try {
     const stores = (req.query.stores ? String(req.query.stores).split(',') : ['itaipu', 'macae', 'rio', 'default'])
@@ -982,38 +544,38 @@ app.get('/api/admin/overview_json', (req, res) => {
     
     const out = [];
     for (const store of stores) {
-      const hb = getOne(\`SELECT store_id, last_seen, state, track_id FROM heartbeats WHERE store_id = ?\`, store);
+      const hb = getOne(`SELECT store_id, last_seen, state, track_id FROM heartbeats WHERE store_id = ?`, store);
       
       let status = 'offline';
       if (hb && hb.last_seen) {
-        const last = getVal(\`SELECT (strftime('%s', 'now') - strftime('%s', ?)) AS delta\`, hb.last_seen);
+        const last = getVal(`SELECT (strftime('%s', 'now') - strftime('%s', ?)) AS delta`, hb.last_seen);
         status = (last !== null && Number(last) <= 60) ? (hb.state || 'online') : 'offline';
       }
       
       let nowPlaying = null;
       if (hb && hb.track_id) {
-        nowPlaying = getOne(\`SELECT id, artist, title FROM tracks WHERE id = ?\`, hb.track_id);
+        nowPlaying = getOne(`SELECT id, artist, title FROM tracks WHERE id = ?`, hb.track_id);
       }
       
-      const firstPlay = getVal(\`
+      const firstPlay = getVal(`
         SELECT MIN(created_at) AS first FROM events
         WHERE store_id = ? AND event_type = 'play' AND date(created_at, 'localtime') = date('now', 'localtime')
-      \`, store);
+      `, store);
       
-      const playsToday = getVal(\`
+      const playsToday = getVal(`
         SELECT COUNT(*) AS c FROM events
         WHERE store_id = ? AND event_type = 'play' AND date(created_at, 'localtime') = date('now', 'localtime')
-      \`, store) || 0;
+      `, store) || 0;
       
-      const likesToday = getVal(\`
+      const likesToday = getVal(`
         SELECT COUNT(*) AS c FROM likes
         WHERE store_id = ? AND is_like = 1 AND date(created_at, 'localtime') = date('now', 'localtime')
-      \`, store) || 0;
+      `, store) || 0;
       
-      const dislikesToday = getVal(\`
+      const dislikesToday = getVal(`
         SELECT COUNT(*) AS c FROM likes
         WHERE store_id = ? AND is_like = 0 AND date(created_at, 'localtime') = date('now', 'localtime')
-      \`, store) || 0;
+      `, store) || 0;
       
       out.push({
         store,
@@ -1038,10 +600,10 @@ app.get('/api/admin/overview_json', (req, res) => {
 
 /* ================== START SERVER ================== */
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(\`
+  console.log(`
 ╔════════════════════════════════════════╗
 ║  🎵 Player TI&CIA Server Running      ║
-║  📡 Port: \${PORT}                        ║
+║  📡 Port: ${PORT}                        ║
 ║  📁 Music: ./music                     ║
 ║  🗄️  Database: ./data/mvp.db           ║
 ║                                        ║
@@ -1049,8 +611,8 @@ app.listen(PORT, '0.0.0.0', () => {
 ║  📊 Overview: /admin/overview          ║
 ║  🎛️  Console: /admin/tracks            ║
 ║                                        ║
-║  👤 User: \${process.env.ADMIN_USER || 'admin'}                   ║
-║  🔑 Pass: \${process.env.ADMIN_PASS || 'changeme'}                ║
+║  👤 User: ${process.env.ADMIN_USER || 'admin'}                   ║
+║  🔑 Pass: ${process.env.ADMIN_PASS || 'changeme'}                ║
 ╚════════════════════════════════════════╝
-  \`);
+  `);
 });
