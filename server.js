@@ -5,7 +5,6 @@ import path from 'path';
 import fs from 'fs';
 import mime from 'mime';
 import { fileURLToPath } from 'url';
-import cookieParser from 'cookie-parser';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,7 +102,27 @@ const stmtSecondsSince = db.prepare(`SELECT (strftime('%s', 'now') - strftime('%
 /* ================== MIDDLEWARES ================== */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
+
+app.use((req, _res, next) => {
+  const header = req.headers?.cookie;
+  const cookies = {};
+
+  if (header) {
+    header.split(';').forEach(part => {
+      const [name, ...rest] = part.trim().split('=');
+      if (!name) return;
+      const value = rest.join('=');
+      try {
+        cookies[name] = decodeURIComponent(value);
+      } catch {
+        cookies[name] = value;
+      }
+    });
+  }
+
+  req.cookies = cookies;
+  next();
+});
 
 function adminAuth(req, res, next) {
   const u = process.env.ADMIN_USER || 'admin';
