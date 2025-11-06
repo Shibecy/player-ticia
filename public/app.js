@@ -1,6 +1,6 @@
 // ========================================
 // PLAYER TI&CIA - app.js
-// Versão limpa com shuffle automático
+// Versão limpa com shuffle automática
 // ========================================
 
 const audio = document.getElementById('audio');
