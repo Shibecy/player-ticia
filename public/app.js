@@ -13,7 +13,10 @@ const elDuration = document.getElementById('duration');
 const clientId = (() => {
   const k = 'player_client_id';
   let id = localStorage.getItem(k);
-  if (!id) { id = Math.random().toString(36).slice(2); localStorage.setItem(k, id); }
+  if (!id) { 
+    id = Math.random().toString(36).slice(2); 
+    localStorage.setItem(k, id); 
+  }
   return id;
 })();
 
@@ -29,78 +32,170 @@ let tracks = [];
 let idx = 0;
 let likeState = null;
 
-function fmt(sec){
-  sec = Math.max(0, Math.floor(sec||0));
-  const m = Math.floor(sec/60); const s = sec%60; return `${m}:${s.toString().padStart(2,'0')}`;
+// FUNÇÃO DE SHUFFLE
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
-function setLikeUI(state){
+function fmt(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function setLikeUI(state) {
   likeState = state;
   btnLike.classList.toggle('active', state === 'like');
   btnDislike.classList.toggle('active', state === 'dislike');
 }
 
-async function fetchLikeState(){
-  const t = tracks[idx]; if (!t) return setLikeUI(null);
+async function fetchLikeState() {
+  const t = tracks[idx];
+  if (!t) return setLikeUI(null);
+  
   const q = new URLSearchParams({ trackId: t.id, clientId, storeId });
-  const r = await fetch(`/api/like/state?${q.toString()}`);
-  if (!r.ok) return setLikeUI(null);
-  const j = await r.json();
-  setLikeUI(j.state || null);
+  try {
+    const r = await fetch(`/api/like/state?${q.toString()}`);
+    if (!r.ok) return setLikeUI(null);
+    const j = await r.json();
+    setLikeUI(j.state || null);
+  } catch (e) {
+    console.error('Error fetching like state:', e);
+    setLikeUI(null);
+  }
 }
 
-async function loadTracks(){
-  const res = await fetch('/api/tracks?shuffle=true');
-  tracks = await res.json();
-  if (tracks.length) selectTrack(0);
+async function loadTracks() {
+  try {
+    const res = await fetch('/api/tracks');
+    tracks = await res.json();
+    
+    // SHUFFLE AUTOMÁTICO A CADA CARREGAMENTO
+    tracks = shuffleArray(tracks);
+    
+    if (tracks.length) {
+      selectTrack(0);
+    }
+  } catch (e) {
+    console.error('Error loading tracks:', e);
+  }
 }
 
-function selectTrack(i){
+function selectTrack(i) {
   if (!tracks.length) return;
+  
   idx = (i + tracks.length) % tracks.length;
   const t = tracks[idx];
+  
   audio.src = t.url;
   elArtist.textContent = t.artist || 'Artista';
   elTitle.textContent = t.title;
+  
   setLikeUI(null);
   fetchLikeState();
 }
 
-async function logEvent(type){
+async function logEvent(type) {
   const trackId = tracks[idx]?.id || null;
   const positionSec = audio.currentTime || 0;
-  await fetch('/api/events',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ clientId, type, trackId, positionSec, storeId })
-  });
+  
+  try {
+    await fetch('/api/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, type, trackId, positionSec, storeId })
+    });
+  } catch (e) {
+    console.error('Error logging event:', e);
+  }
 }
 
-btnPlay.onclick = async ()=>{ await audio.play(); await logEvent('play'); };
-btnPause.onclick = async ()=>{ audio.pause(); await logEvent('pause'); };
-btnNext.onclick = ()=>{ if(!tracks.length) return; selectTrack(idx+1); audio.play(); logEvent('resume'); };
-
-async function rate(like){
-  const trackId = tracks[idx]?.id; if(!trackId) return;
-  const r = await fetch('/api/like',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ trackId, clientId, like, storeId }) });
-  const j = await r.json().catch(()=>({}));
-  setLikeUI(j.state || (like ? 'like' : 'dislike'));
+async function sendHeartbeat() {
+  const trackId = tracks[idx]?.id || null;
+  const state = audio.paused ? 'paused' : 'playing';
+  
+  try {
+    await fetch('/api/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ store: storeId, state, trackId })
+    });
+  } catch (e) {
+    console.error('Error sending heartbeat:', e);
+  }
 }
-btnLike.onclick = ()=> rate(true);
-btnDislike.onclick = ()=> rate(false);
 
-audio.addEventListener('ended', ()=>{ btnNext.click(); });
-audio.addEventListener('timeupdate', ()=>{
-  elSeek.value = (audio.currentTime / (audio.duration||1)) * 100;
-  elElapsed.textContent = fmt(audio.currentTime);
-  elDuration.textContent = fmt(audio.duration||0);
+btnPlay.onclick = async () => {
+  try {
+    await audio.play();
+    await logEvent('play');
+  } catch (e) {
+    console.error('Error playing:', e);
+  }
+};
+
+btnPause.onclick = async () => {
+  audio.pause();
+  await logEvent('pause');
+};
+
+btnNext.onclick = () => {
+  if (!tracks.length) return;
+  selectTrack(idx + 1);
+  audio.play();
+  logEvent('skip');
+};
+
+async function rate(like) {
+  const trackId = tracks[idx]?.id;
+  if (!trackId) return;
+  
+  try {
+    const r = await fetch('/api/like', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trackId, clientId, like, storeId })
+    });
+    
+    const j = await r.json().catch(() => ({}));
+    setLikeUI(j.state || (like ? 'like' : 'dislike'));
+  } catch (e) {
+    console.error('Error rating track:', e);
+  }
+}
+
+btnLike.onclick = () => rate(true);
+btnDislike.onclick = () => rate(false);
+
+audio.addEventListener('ended', () => {
+  btnNext.click();
 });
-elSeek.addEventListener('input', ()=>{
+
+audio.addEventListener('timeupdate', () => {
+  if (audio.duration) {
+    elSeek.value = (audio.currentTime / audio.duration) * 100;
+    elElapsed.textContent = fmt(audio.currentTime);
+    elDuration.textContent = fmt(audio.duration);
+  }
+});
+
+elSeek.addEventListener('input', () => {
   if (!audio.duration) return;
-  const to = (elSeek.value/100) * audio.duration;
+  const to = (elSeek.value / 100) * audio.duration;
   audio.currentTime = to;
 });
 
-window.addEventListener('focus', ()=> logEvent('resume'));
-window.addEventListener('blur', ()=> logEvent('pause'));
+window.addEventListener('focus', () => logEvent('resume'));
+window.addEventListener('blur', () => logEvent('pause'));
 
+// Heartbeat a cada 60 segundos
+setInterval(sendHeartbeat, 60000);
+
+// Carregar playlist ao iniciar
 loadTracks();
