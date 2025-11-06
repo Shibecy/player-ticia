@@ -13,6 +13,13 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
 const DEFAULT_STORE = process.env.STORE_ID || 'default';
+const ADMIN_USER = process.env.ADMIN_USER;
+const ADMIN_PASS = process.env.ADMIN_PASS;
+
+if (!ADMIN_USER || !ADMIN_PASS) {
+  console.error('ADMIN_USER and ADMIN_PASS environment variables must be set to secure the admin interface.');
+  process.exit(1);
+}
 const MUSIC_DIR = path.resolve('./music');
 const DB_DIR = path.resolve('./data');
 const DB_PATH = path.join(DB_DIR, 'mvp.db');
@@ -104,17 +111,15 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 function adminAuth(req, res, next) {
-  const u = process.env.ADMIN_USER || 'admin';
-  const p = process.env.ADMIN_PASS || 'changeme';
   const h = req.headers['authorization'] || '';
-  
+
   if (!h.startsWith('Basic ')) {
     res.set('WWW-Authenticate', 'Basic realm="Admin"');
     return res.status(401).send('Auth required');
   }
-  
+
   const [user, pass] = Buffer.from(h.slice(6), 'base64').toString().split(':');
-  if (user === u && pass === p) return next();
+  if (user === ADMIN_USER && pass === ADMIN_PASS) return next();
   
   res.set('WWW-Authenticate', 'Basic realm="Admin"');
   return res.status(401).send('Unauthorized');
@@ -242,8 +247,11 @@ app.get('/', (_, res) => res.sendFile(path.resolve('public/index.html')));
 
 app.get('/api/tracks', (req, res) => {
   const shuffle = req.query.shuffle === 'true';
-  
-  let list = db.prepare(`SELECT id, filename, artist, title FROM tracks ORDER BY created_at DESC`).all().map(t => {
+  const storeId = getStoreId(req);
+
+  getClientId(req, res);
+
+  let list = db.prepare(`SELECT id, filename, artist, title FROM tracks WHERE store_id = ? ORDER BY created_at DESC`).all(storeId).map(t => {
     let artist = t.artist, title = t.title;
     if (!artist || !title) {
       const d = parseArtistTitleFromFilename(t.filename);
@@ -295,68 +303,94 @@ app.get('/audio/:trackId', (req, res) => {
 });
 
 app.get('/api/like/state', (req, res) => {
-  const { trackId, clientId } = req.query || {};
   const storeId = getStoreId(req);
-  
+  const trackId = sanitize((req.query || {}).trackId);
+  let clientId = sanitize((req.query || {}).clientId);
+
+  if (!clientId) {
+    clientId = sanitize(getClientId(req, res));
+  } else {
+    getClientId(req, res);
+  }
+
   if (!trackId || !clientId) {
     return res.status(400).json({ error: 'Parâmetros inválidos' });
   }
-  
+
   const row = db.prepare(`
-    SELECT is_like FROM likes 
+    SELECT is_like FROM likes
     WHERE track_id = ? AND client_id = ? AND store_id = ?
   `).get(trackId, clientId, storeId);
-  
+
   const state = row == null ? null : (row.is_like ? 'like' : 'dislike');
   res.json({ state });
 });
 
 app.post('/api/like', (req, res) => {
-  const { trackId, clientId, like } = req.body || {};
   const storeId = getStoreId(req);
-  
+  const like = (req.body || {}).like;
+  const trackId = sanitize((req.body || {}).trackId);
+  let clientId = sanitize((req.body || {}).clientId);
+
+  if (!clientId) {
+    clientId = sanitize(getClientId(req, res));
+  } else {
+    getClientId(req, res);
+  }
+
   if (!trackId || !clientId || typeof like !== 'boolean') {
     return res.status(400).json({ error: 'Parâmetros inválidos' });
   }
-  
+
   stmtUpsertLike.run(trackId, clientId, like ? 1 : 0, storeId);
   res.json({ ok: true, state: like ? 'like' : 'dislike' });
 });
 
 app.post('/api/events', (req, res) => {
-  const { clientId, type, trackId, positionSec } = req.body || {};
   const storeId = getStoreId(req);
-  
-  if (!clientId || !type) {
+  const body = req.body || {};
+  let clientId = sanitize(body.clientId);
+  const eventType = sanitize(body.type).toLowerCase();
+  const trackId = sanitize(body.trackId);
+  const positionSecRaw = Number(body.positionSec);
+  const positionSec = Number.isFinite(positionSecRaw) ? positionSecRaw : 0;
+
+  if (!clientId) {
+    clientId = sanitize(getClientId(req, res));
+  } else {
+    getClientId(req, res);
+  }
+
+  if (!clientId || !eventType) {
     return res.status(400).json({ error: 'Parâmetros inválidos' });
   }
-  
+
   const day = new Date().toISOString().slice(0, 10);
-  
-  if (type === 'play') {
+
+  if (eventType === 'play') {
     const count = db.prepare(`
-      SELECT COUNT(*) c FROM events 
-      WHERE client_id = ? AND store_id = ? 
-      AND event_type IN ('play', 'resume') 
+      SELECT COUNT(*) c FROM events
+      WHERE client_id = ? AND store_id = ?
+      AND event_type IN ('play', 'resume')
       AND DATE(created_at) = DATE('now')
     `).get(clientId, storeId).c;
-    
+
     if (count === 0) {
-      stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec || 0, storeId);
+      stmtInsertEvent.run(clientId, 'first_play_of_day', trackId || null, positionSec, storeId);
     }
   }
-  
-  if (type === 'play' || type === 'resume') {
+
+  if (eventType === 'play' || eventType === 'resume') {
     const open = stmtGetOpenSess.get(clientId, day, storeId);
     if (!open) stmtOpenSession.run(clientId, day, storeId);
   }
-  
-  if (type === 'pause') {
+
+  if (eventType === 'pause') {
     const open = stmtGetOpenSess.get(clientId, day, storeId);
     if (open) stmtCloseSession.run(open.id);
   }
-  
-  stmtInsertEvent.run(clientId, type, trackId || null, positionSec || 0, storeId);
+
+  stmtInsertEvent.run(clientId, eventType, trackId || null, positionSec, storeId);
   res.json({ ok: true });
 });
 
