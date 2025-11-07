@@ -102,21 +102,34 @@ function renderStoreCard({storeId, time, start, nowPlaying, date}){
 
 async function loadAll(){
   statusEl.textContent = 'carregando…';
+  statusEl.style.color = '#718096';
   try{
     const stores = (await fetchJSON('/api/stores')).stores || [];
-    if (!stores.length){ storesEl.innerHTML = '<div class="muted">Nenhuma loja registrada ainda.</div>'; }
+    if (!stores.length){
+      storesEl.innerHTML = '<div style="text-align:center;padding:40px;color:#718096">Nenhuma loja com dados ainda. As lojas aparecerão aqui quando os players começarem a tocar.</div>';
+      statusEl.textContent = 'Aguardando dados…';
+      return;
+    }
+    storesEl.innerHTML = '';
     for (const s of stores){
       try{
         const data = await loadStoreCard(s);
         renderStoreCard(data);
       }catch(e){
         console.error('Erro ao carregar loja', s, e);
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `<h2>${s}</h2><div class="muted">Sem dados para esta loja ainda.</div>`;
+        storesEl.appendChild(card);
       }
     }
-    statusEl.textContent = 'atualizado: ' + new Date().toLocaleTimeString();
+    statusEl.textContent = '✅ Atualizado: ' + new Date().toLocaleTimeString();
+    statusEl.style.color = '#38a169';
   }catch(e){
-    statusEl.textContent = 'erro ao carregar';
-    console.error(e);
+    statusEl.textContent = '❌ Erro: ' + e.message;
+    statusEl.style.color = '#e53e3e';
+    console.error('Erro completo:', e);
+    storesEl.innerHTML = '<div style="text-align:center;padding:40px;color:#e53e3e">Erro ao carregar dados. Verifique o console para mais detalhes.</div>';
   }
 }
 
