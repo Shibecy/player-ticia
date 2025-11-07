@@ -416,6 +416,76 @@ app.post('/api/heartbeat', (req, res) => {
   }
 });
 
+/* ================== PUBLIC APIS ================== */
+app.get('/api/stores', (req, res) => {
+  try {
+    const stores = db.prepare(`SELECT DISTINCT store_id FROM heartbeats ORDER BY store_id`).all().map(r => r.store_id);
+    res.json({ ok: true, stores });
+  } catch (e) {
+    console.error('stores error:', e);
+    res.json({ ok: true, stores: ['itaipu', 'macae', 'rio'] });
+  }
+});
+
+app.get('/api/now-playing', (req, res) => {
+  try {
+    const storeId = sanitize(req.query.storeId || 'default');
+    const hb = db.prepare(`SELECT track_id FROM heartbeats WHERE store_id = ?`).get(storeId);
+    if (!hb || !hb.track_id) {
+      return res.json({ ok: true, nowPlaying: null });
+    }
+    const track = db.prepare(`SELECT id, artist, title FROM tracks WHERE id = ?`).get(hb.track_id);
+    res.json({ ok: true, nowPlaying: track || null });
+  } catch (e) {
+    console.error('now-playing error:', e);
+    res.json({ ok: true, nowPlaying: null });
+  }
+});
+
+app.get('/api/report/daily', (req, res) => {
+  try {
+    const date = sanitize(req.query.date || '');
+    const storeId = sanitize(req.query.storeId || 'default');
+    const day = date || db.prepare(`SELECT date('now', 'localtime') AS d`).get().d;
+
+    const row = db.prepare(`SELECT seconds_played, last_ts FROM playtime_daily WHERE store_id = ? AND day = ?`).get(storeId, day);
+    const totalSecondsPlayed = row ? row.seconds_played : 0;
+    const dayStart = row && row.last_ts ? row.last_ts : null;
+
+    res.json({ ok: true, totals: { totalSecondsPlayed, dayStart }, day, storeId });
+  } catch (e) {
+    console.error('report/daily error:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get('/api/report/csv', (req, res) => {
+  try {
+    const date = sanitize(req.query.date || '');
+    const storeId = sanitize(req.query.storeId || 'default');
+    const day = date || db.prepare(`SELECT date('now', 'localtime') AS d`).get().d;
+
+    const events = db.prepare(`
+      SELECT created_at, event_type, track_id, client_id
+      FROM events
+      WHERE store_id = ? AND date(created_at, 'localtime') = ?
+      ORDER BY created_at
+    `).all(storeId, day);
+
+    let csv = 'timestamp,event,track_id,client\n';
+    events.forEach(e => {
+      csv += `${e.created_at},${e.event_type},${e.track_id||''},${e.client_id}\n`;
+    });
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="report-${storeId}-${day}.csv"`);
+    res.send(csv);
+  } catch (e) {
+    console.error('report/csv error:', e);
+    res.status(500).send('Error generating CSV');
+  }
+});
+
 /* ================== ADMIN ================== */
 app.get('/admin', (_, res) => res.sendFile(path.resolve('public/admin.html')));
 
