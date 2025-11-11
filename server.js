@@ -466,18 +466,47 @@ app.get('/api/report/csv', (req, res) => {
     const day = date || db.prepare(`SELECT date('now', 'localtime') AS d`).get().d;
 
     const events = db.prepare(`
-      SELECT created_at, event_type, track_id, client_id
-      FROM events
-      WHERE store_id = ? AND date(created_at, 'localtime') = ?
-      ORDER BY created_at
+      SELECT
+        e.created_at,
+        e.event_type,
+        e.track_id,
+        e.client_id,
+        e.position_sec,
+        t.artist,
+        t.title
+      FROM events e
+      LEFT JOIN tracks t ON e.track_id = t.id
+      WHERE e.store_id = ? AND date(e.created_at, 'localtime') = ?
+      ORDER BY e.created_at
     `).all(storeId, day);
 
-    let csv = 'timestamp,event,track_id,client\n';
-    events.forEach(e => {
-      csv += `${e.created_at},${e.event_type},${e.track_id||''},${e.client_id}\n`;
-    });
+    let csv = 'timestamp,event,musica,artista,tempo_execucao_seg,client\n';
 
-    res.setHeader('Content-Type', 'text/csv');
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i];
+      const musicName = e.title || 'Desconhecida';
+      const artist = e.artist || '-';
+      let executionTime = '';
+
+      // Calcular tempo de execução: se for 'skip' ou 'pause', pegar position_sec
+      if ((e.event_type === 'skip' || e.event_type === 'pause') && e.position_sec) {
+        executionTime = Math.floor(e.position_sec);
+      }
+      // Se for 'play' seguido de outro evento, calcular diferença de tempo
+      else if (e.event_type === 'play' && i + 1 < events.length) {
+        const nextEvent = events[i + 1];
+        if (nextEvent.track_id === e.track_id) {
+          const timeDiff = db.prepare(`
+            SELECT (strftime('%s', ?) - strftime('%s', ?)) AS diff
+          `).get(nextEvent.created_at, e.created_at);
+          executionTime = timeDiff ? Math.max(0, timeDiff.diff) : '';
+        }
+      }
+
+      csv += `${e.created_at},${e.event_type},"${artist} - ${musicName}","${artist}",${executionTime},${e.client_id}\n`;
+    }
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="report-${storeId}-${day}.csv"`);
     res.send(csv);
   } catch (e) {
