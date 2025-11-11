@@ -9,6 +9,7 @@ services:
       - PORT=8080
       - ADMIN_USER=admin
       - ADMIN_PASS=SenhaFORTE101
+      - TZ=America/Sao_Paulo
     volumes:
       - ./music:/usr/src/app/music
       - ./data:/usr/src/app/data
