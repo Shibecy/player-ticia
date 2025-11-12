@@ -4,6 +4,7 @@
 // ========================================
 
 const audio = document.getElementById('audio');
+const audioPreload = document.getElementById('audio-preload');
 const btnPlay = document.getElementById('btn-play');
 const btnPause = document.getElementById('btn-pause');
 const btnNext = document.getElementById('btn-next');
@@ -137,23 +138,42 @@ async function loadPlaylist() {
 }
 
 // ========================================
+// PRELOAD - Carregar próxima música
+// ========================================
+function preloadNextTrack() {
+  if (!tracks.length) return;
+
+  const nextIndex = ((currentIndex + 1) % tracks.length + tracks.length) % tracks.length;
+  const nextTrack = tracks[nextIndex];
+
+  if (nextTrack && audioPreload) {
+    audioPreload.src = nextTrack.url;
+    audioPreload.load();
+    console.log(`📦 Preload: ${nextTrack.artist} - ${nextTrack.title}`);
+  }
+}
+
+// ========================================
 // SELECIONAR FAIXA
 // ========================================
 function selectTrack(index) {
   if (!tracks.length) return;
-  
+
   // Garantir índice válido (circular)
   currentIndex = ((index % tracks.length) + tracks.length) % tracks.length;
-  
+
   const track = tracks[currentIndex];
-  
+
   audio.src = track.url;
   elArtist.textContent = track.artist || 'Artista Desconhecido';
   elTitle.textContent = track.title || 'Sem Título';
-  
+
   updateLikeUI(null);
   fetchLikeState();
-  
+
+  // Preload da próxima música
+  preloadNextTrack();
+
   console.log(`🎵 Tocando: ${track.artist} - ${track.title}`);
 }
 

@@ -647,8 +647,8 @@ app.get('/api/admin/overview_json', (req, res) => {
       
       let status = 'offline';
       if (hb && hb.last_seen) {
-        const last = getVal(`SELECT (strftime('%s', 'now') - strftime('%s', ?)) AS delta`, hb.last_seen);
-        status = (last !== null && Number(last) <= 60) ? (hb.state || 'online') : 'offline';
+        const last = getVal(`SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) AS delta`, hb.last_seen);
+        status = (last !== null && Number(last) <= 90) ? (hb.state || 'online') : 'offline';
       }
       
       let nowPlaying = null;
