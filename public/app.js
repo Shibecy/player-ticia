@@ -7,7 +7,6 @@ const audio = document.getElementById('audio');
 const audioPreload = document.getElementById('audio-preload');
 const btnPlay = document.getElementById('btn-play');
 const btnPause = document.getElementById('btn-pause');
-const btnNext = document.getElementById('btn-next');
 const btnLike = document.getElementById('btn-like');
 const btnDislike = document.getElementById('btn-dislike');
 const elArtist = document.getElementById('artist');
@@ -245,20 +244,19 @@ btnPause.onclick = async () => {
 };
 
 // ========================================
-// CONTROLES - PRÓXIMA
+// FUNÇÃO PARA PRÓXIMA MÚSICA
 // ========================================
-btnNext.onclick = async () => {
+async function playNextTrack() {
   if (!tracks.length) return;
-  
+
   selectTrack(currentIndex + 1);
-  
+
   try {
     await audio.play();
-    await logEvent('skip');
   } catch (error) {
-    console.error('Erro ao pular música:', error);
+    console.error('Erro ao tocar próxima música:', error);
   }
-};
+}
 
 // ========================================
 // FEEDBACK - LIKE/DISLIKE
@@ -297,7 +295,7 @@ btnDislike.onclick = () => sendFeedback(false);
 
 // Música terminou - tocar próxima
 audio.addEventListener('ended', () => {
-  btnNext.click();
+  playNextTrack();
 });
 
 // Atualizar progresso
