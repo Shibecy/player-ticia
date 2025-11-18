@@ -488,11 +488,11 @@ app.get('/api/report/csv', (req, res) => {
       const artist = e.artist || '-';
       let executionTime = '';
 
-      // Calcular tempo de execução: se for 'skip' ou 'pause', pegar position_sec
-      if ((e.event_type === 'skip' || e.event_type === 'pause') && e.position_sec) {
+      // Calcular tempo de execução: se for 'skip', 'pause' ou 'ended', pegar position_sec
+      if ((e.event_type === 'skip' || e.event_type === 'pause' || e.event_type === 'ended') && e.position_sec) {
         executionTime = Math.floor(e.position_sec);
       }
-      // Se for 'play' seguido de outro evento, calcular diferença de tempo
+      // Se for 'play' seguido de outro evento da mesma música, calcular diferença de tempo
       else if (e.event_type === 'play' && i + 1 < events.length) {
         const nextEvent = events[i + 1];
         if (nextEvent.track_id === e.track_id) {

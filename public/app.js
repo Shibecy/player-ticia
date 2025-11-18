@@ -253,6 +253,7 @@ async function playNextTrack() {
 
   try {
     await audio.play();
+    await logEvent('play');
   } catch (error) {
     console.error('Erro ao tocar próxima música:', error);
   }
@@ -294,7 +295,8 @@ btnDislike.onclick = () => sendFeedback(false);
 // ========================================
 
 // Música terminou - tocar próxima
-audio.addEventListener('ended', () => {
+audio.addEventListener('ended', async () => {
+  await logEvent('ended');
   playNextTrack();
 });
 
