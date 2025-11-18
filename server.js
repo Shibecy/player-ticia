@@ -480,7 +480,7 @@ app.get('/api/report/csv', (req, res) => {
       ORDER BY e.created_at
     `).all(storeId, day);
 
-    let csv = 'timestamp,event,musica,artista,tempo_execucao_seg,client\n';
+    let csv = 'timestamp,event,musica,artista,tempo_execucao_min,client\n';
 
     for (let i = 0; i < events.length; i++) {
       const e = events[i];
@@ -490,7 +490,8 @@ app.get('/api/report/csv', (req, res) => {
 
       // Calcular tempo de execução: se for 'skip', 'pause' ou 'ended', pegar position_sec
       if ((e.event_type === 'skip' || e.event_type === 'pause' || e.event_type === 'ended') && e.position_sec) {
-        executionTime = Math.floor(e.position_sec);
+        const minutes = (e.position_sec / 60).toFixed(2);
+        executionTime = minutes;
       }
       // Se for 'play' seguido de outro evento da mesma música, calcular diferença de tempo
       else if (e.event_type === 'play' && i + 1 < events.length) {
@@ -499,7 +500,10 @@ app.get('/api/report/csv', (req, res) => {
           const timeDiff = db.prepare(`
             SELECT (strftime('%s', ?) - strftime('%s', ?)) AS diff
           `).get(nextEvent.created_at, e.created_at);
-          executionTime = timeDiff ? Math.max(0, timeDiff.diff) : '';
+          if (timeDiff) {
+            const minutes = (Math.max(0, timeDiff.diff) / 60).toFixed(2);
+            executionTime = minutes;
+          }
         }
       }
 
