@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   artist TEXT,
   title TEXT,
   store_id TEXT DEFAULT '${DEFAULT_STORE}',
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS likes (
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS likes (
   client_id TEXT NOT NULL,
   is_like INTEGER NOT NULL,
   store_id TEXT NOT NULL DEFAULT '${DEFAULT_STORE}',
-  created_at TEXT DEFAULT (datetime('now')),
+  created_at TEXT DEFAULT (datetime('now', 'localtime')),
   UNIQUE(track_id, client_id, store_id)
 );
 
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS events (
   track_id TEXT,
   position_sec REAL,
   store_id TEXT NOT NULL DEFAULT '${DEFAULT_STORE}',
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS heartbeats (
   store_id TEXT PRIMARY KEY,
-  last_seen TEXT DEFAULT (datetime('now')),
+  last_seen TEXT DEFAULT (datetime('now', 'localtime')),
   state TEXT,
   track_id TEXT
 );
@@ -88,14 +88,14 @@ try { db.exec(`ALTER TABLE sessions ADD COLUMN store_id TEXT DEFAULT '${DEFAULT_
 const stmtInsertTrack = db.prepare(`INSERT OR IGNORE INTO tracks (id, filename, artist, title, store_id) VALUES (@id, @filename, @artist, @title, @storeId)`);
 const stmtFindTrack = db.prepare(`SELECT * FROM tracks WHERE id = ?`);
 const stmtUpsertLike = db.prepare(`
-  INSERT INTO likes (track_id, client_id, is_like, store_id) 
+  INSERT INTO likes (track_id, client_id, is_like, store_id)
   VALUES (?, ?, ?, ?)
-  ON CONFLICT(track_id, client_id, store_id) 
-  DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now')
+  ON CONFLICT(track_id, client_id, store_id)
+  DO UPDATE SET is_like = excluded.is_like, created_at = datetime('now', 'localtime')
 `);
 const stmtInsertEvent = db.prepare(`INSERT INTO events (client_id, event_type, track_id, position_sec, store_id) VALUES (?, ?, ?, ?, ?)`);
-const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time, store_id) VALUES (?, ?, datetime('now'), ?)`);
-const stmtCloseSession = db.prepare(`UPDATE sessions SET end_time = datetime('now') WHERE id = ?`);
+const stmtOpenSession = db.prepare(`INSERT INTO sessions (client_id, day, start_time, store_id) VALUES (?, ?, datetime('now', 'localtime'), ?)`);
+const stmtCloseSession = db.prepare(`UPDATE sessions SET end_time = datetime('now', 'localtime') WHERE id = ?`);
 const stmtGetOpenSess = db.prepare(`SELECT * FROM sessions WHERE client_id = ? AND day = ? AND store_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1`);
 
 /* ================== MIDDLEWARES ================== */
