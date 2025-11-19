@@ -296,7 +296,6 @@ btnDislike.onclick = () => sendFeedback(false);
 
 // Música terminou - tocar próxima
 audio.addEventListener('ended', async () => {
-  await logEvent('ended');
   playNextTrack();
 });
 

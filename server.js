@@ -484,27 +484,40 @@ app.get('/api/report/csv', (req, res) => {
 
     for (let i = 0; i < events.length; i++) {
       const e = events[i];
+
+      // Pular eventos 'ended' - não aparecem no relatório
+      if (e.event_type === 'ended') continue;
+
       const musicName = e.title || 'Desconhecida';
       const artist = e.artist || '-';
       let executionTime = '';
 
-      // Calcular tempo de execução: se for 'skip', 'pause' ou 'ended', pegar position_sec
-      if ((e.event_type === 'skip' || e.event_type === 'pause' || e.event_type === 'ended') && e.position_sec) {
-        const minutes = (e.position_sec / 60).toFixed(2);
-        executionTime = minutes;
-      }
-      // Se for 'play' seguido de outro evento da mesma música, calcular diferença de tempo
-      else if (e.event_type === 'play' && i + 1 < events.length) {
-        const nextEvent = events[i + 1];
-        if (nextEvent.track_id === e.track_id) {
+      // Apenas registrar tempo de execução em eventos 'play'
+      if (e.event_type === 'play' && i + 1 < events.length) {
+        // Procurar próximo evento 'play' (ignorando 'ended')
+        let nextPlayIndex = -1;
+        for (let j = i + 1; j < events.length; j++) {
+          if (events[j].event_type === 'play') {
+            nextPlayIndex = j;
+            break;
+          }
+        }
+
+        if (nextPlayIndex !== -1) {
+          const nextPlay = events[nextPlayIndex];
           const timeDiff = db.prepare(`
             SELECT (strftime('%s', ?) - strftime('%s', ?)) AS diff
-          `).get(nextEvent.created_at, e.created_at);
+          `).get(nextPlay.created_at, e.created_at);
           if (timeDiff) {
             const minutes = (Math.max(0, timeDiff.diff) / 60).toFixed(2);
             executionTime = minutes;
           }
         }
+      }
+      // Para eventos 'pause' e 'skip', usar position_sec
+      else if ((e.event_type === 'pause' || e.event_type === 'skip') && e.position_sec) {
+        const minutes = (e.position_sec / 60).toFixed(2);
+        executionTime = minutes;
       }
 
       csv += `${e.created_at},${e.event_type},"${artist} - ${musicName}","${artist}",${executionTime},${e.client_id}\n`;
