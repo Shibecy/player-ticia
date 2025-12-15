@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monitoramento de Preços - TI e CIA</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* Header - Cores da marca */
+    .header {
+      background: linear-gradient(135deg, #000 0%, #1a1a1a 100%);
+      color: #fff;
+      border-radius: 8px;
+      padding: 30px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      border-top: 3px solid #00bcd4; /* Ciano da marca */
+    }
+
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 5px;
+      font-weight: 700;
+    }
+
+    .header p {
+      font-size: 14px;
+      opacity: 0.8;
+    }
+
+    /* Filtro de Lojas */
+    .store-filter {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .store-btn {
+      padding: 12px 24px;
+      border: 2px solid #000;
+      background: #fff;
+      color: #000;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+
+    .store-btn:hover {
+      background: #f0f0f0;
+    }
+
+    .store-btn.active {
+      background: #000;
+      color: #fff;
+    }
+
+    /* Stats Cards */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    .stat-card {
+      background: #fff;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 20px;
+    }
+
+    .stat-card .label {
+      color: #666;
+      font-size: 12px;
+      text-transform: uppercase;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .stat-card .value {
+      color: #000;
+      font-size: 32px;
+      font-weight: 700;
+    }
+
+    .stat-card.alert .value {
+      color: #d32f2f;
+    }
+
+    /* Actions */
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      background: #fff;
+      color: #000;
+      border: 2px solid #000;
+      padding: 12px 24px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn:hover {
+      background: #000;
+      color: #fff;
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: #000;
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: #333;
+    }
+
+    /* Alerts Section */
+    .alerts-section {
+      background: #fff;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 25px;
+    }
+
+    .alerts-section h2 {
+      color: #000;
+      font-size: 20px;
+      margin-bottom: 20px;
+      font-weight: 700;
+    }
+
+    .alert-item {
+      border: 2px solid #ffebee;
+      background: #fff;
+      border-radius: 6px;
+      padding: 20px;
+      margin-bottom: 12px;
+      transition: all 0.2s;
+    }
+
+    .alert-item:hover {
+      border-color: #d32f2f;
+      box-shadow: 0 2px 8px rgba(211, 47, 47, 0.1);
+    }
+
+    .alert-item.visualizado {
+      opacity: 0.5;
+      border-color: #e0e0e0;
+    }
+
+    .alert-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      margin-bottom: 15px;
+    }
+
+    .alert-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #000;
+      flex: 1;
+    }
+
+    .alert-badge {
+      background: #d32f2f;
+      color: #fff;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    /* Ranking Badge */
+    .ranking-badge {
+      display: inline-block;
+      background: linear-gradient(135deg, #7b1fa2 0%, #9c27b0 100%); /* Roxo da marca */
+      color: #fff;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-left: 10px;
+      box-shadow: 0 2px 4px rgba(123, 31, 162, 0.2);
+    }
+
+    .alert-details {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 15px;
+      margin: 15px 0;
+    }
+
+    .detail {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .detail-label {
+      font-size: 11px;
+      color: #666;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .detail-value {
+      font-size: 15px;
+      color: #000;
+      font-weight: 700;
+    }
+
+    .alert-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 15px;
+      padding-top: 15px;
+      border-top: 1px solid #f0f0f0;
+    }
+
+    .alert-store {
+      font-size: 13px;
+      color: #666;
+      font-weight: 600;
+    }
+
+    .alert-link {
+      color: #000;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      border-bottom: 2px solid #000;
+    }
+
+    .alert-link:hover {
+      opacity: 0.7;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #999;
+    }
+
+    .empty-state-icon {
+      font-size: 48px;
+      margin-bottom: 15px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #999;
+    }
+
+    .spinner {
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #000;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 20px;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 30px;
+      right: 30px;
+      background: #000;
+      color: #fff;
+      padding: 16px 24px;
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all 0.3s;
+      z-index: 1000;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    .toast.success {
+      background: #2e7d32;
+    }
+
+    .toast.error {
+      background: #d32f2f;
+    }
+
+    @media (max-width: 768px) {
+      .header h1 {
+        font-size: 22px;
+      }
+
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .alert-details {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.7);
+      z-index: 2000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.show {
+      display: flex;
+    }
+
+    .modal {
+      background: #fff;
+      border-radius: 8px;
+      padding: 30px;
+      max-width: 800px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 25px;
+      padding-bottom: 15px;
+      border-bottom: 2px solid #f0f0f0;
+    }
+
+    .modal-header h2 {
+      color: #000;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 28px;
+      cursor: pointer;
+      color: #999;
+      padding: 0;
+      width: 30px;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-close:hover {
+      color: #000;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      color: #000;
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 12px 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: #000;
+    }
+
+    .produto-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 15px;
+      border: 2px solid #f0f0f0;
+      border-radius: 6px;
+      margin-bottom: 10px;
+      transition: all 0.2s;
+    }
+
+    .produto-item:hover {
+      border-color: #000;
+    }
+
+    .produto-url {
+      flex: 1;
+      color: #000;
+      word-break: break-all;
+      margin-right: 15px;
+      font-size: 13px;
+    }
+
+    .btn-remove {
+      background: #d32f2f;
+      color: #fff;
+      border: none;
+      padding: 8px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+
+    .btn-remove:hover {
+      background: #b71c1c;
+    }
+
+    .empty-produtos {
+      text-align: center;
+      padding: 40px 20px;
+      color: #999;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <h1>Monitoramento de Preços</h1>
+      <p>TI e CIA - Sistema Interno</p>
+    </div>
+
+    <!-- Filtro de Lojas -->
+    <div class="store-filter">
+      <button class="store-btn active" onclick="filtrarPorLoja('todas')" data-store="todas">
+        Todas as Lojas
+      </button>
+      <button class="store-btn" onclick="filtrarPorLoja('centro')" data-store="centro">
+        TI e CIA Centro
+      </button>
+      <button class="store-btn" onclick="filtrarPorLoja('itaipu')" data-store="itaipu">
+        TI e CIA Itaipu
+      </button>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="label">Produtos Monitorados</div>
+        <div class="value" id="totalProdutos">-</div>
+      </div>
+      <div class="stat-card alert">
+        <div class="label">Produtos Perdendo</div>
+        <div class="value" id="alertasPendentes">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Precisa Baixar (Total)</div>
+        <div class="value" id="precisaBaixar" style="font-size: 20px;">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Última Atualização</div>
+        <div class="value" id="ultimaAtualizacao" style="font-size: 14px;">-</div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="actions">
+      <button class="btn btn-primary" onclick="executarAnalise()" id="btnExecutar">
+        Executar Análise
+      </button>
+      <button class="btn" onclick="abrirModalProdutos()">
+        Gerenciar Produtos
+      </button>
+      <button class="btn" onclick="carregarDados()">
+        Atualizar
+      </button>
+    </div>
+
+    <!-- Alerts -->
+    <div class="alerts-section">
+      <h2>Produtos com Preço Superior</h2>
+      <div id="alertasContainer">
+        <div class="loading">
+          <div class="spinner"></div>
+          <div>Carregando...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast"></div>
+
+  <!-- Modal Gerenciar Produtos -->
+  <div id="modalProdutos" class="modal-overlay" onclick="fecharModalProdutos(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2>Gerenciar Produtos</h2>
+        <button class="modal-close" onclick="fecharModalProdutos()">&times;</button>
+      </div>
+
+      <div class="form-group">
+        <label for="novoProdutoUrl">Adicionar Novo Produto</label>
+        <input
+          type="text"
+          id="novoProdutoUrl"
+          placeholder="https://boadica.com.br/produtos/p123456"
+          onkeypress="if(event.key==='Enter') adicionarProduto()"
+        >
+      </div>
+
+      <button class="btn btn-primary" onclick="adicionarProduto()" style="width: 100%; margin-bottom: 30px;">
+        Adicionar Produto
+      </button>
+
+      <h3 style="margin-bottom: 15px; color: #000; font-size: 16px;">
+        Produtos Monitorados (<span id="totalProdutosModal">0</span>)
+      </h3>
+
+      <div id="listaProdutos">
+        <div class="loading">
+          <div class="spinner"></div>
+          <div>Carregando...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let alertasData = [];
+    let lojaFiltro = 'todas';
+    const BASE_URL = 'https://boadica.com.br';
+
+    // Carregar dados ao iniciar
+    document.addEventListener('DOMContentLoaded', () => {
+      carregarDados();
+      setInterval(carregarDados, 5 * 60 * 1000);
+    });
+
+    async function carregarDados() {
+      try {
+        // Carregar status
+        const statusRes = await fetch('/api/boadica/status');
+        const status = await statusRes.json();
+
+        if (status.success) {
+          document.getElementById('totalProdutos').textContent = status.total_produtos || 0;
+          document.getElementById('alertasPendentes').textContent = status.alertas_pendentes || 0;
+          document.getElementById('ultimaAtualizacao').textContent =
+            status.ultima_atualizacao ? formatarData(status.ultima_atualizacao) : 'Nunca';
+        }
+
+        // Carregar alertas
+        const alertasRes = await fetch('/api/boadica/alertas');
+        const alertas = await alertasRes.json();
+
+        if (alertas.success) {
+          alertasData = alertas.alertas;
+          renderizarAlertas();
+
+          // Calcular total a baixar
+          const totalBaixar = alertasData
+            .filter(a => !a.visualizado)
+            .reduce((sum, a) => sum + a.diferenca, 0);
+
+          document.getElementById('precisaBaixar').textContent =
+            `R$ ${totalBaixar.toFixed(2)}`;
+        }
+      } catch (error) {
+        mostrarToast('Erro ao carregar dados', 'error');
+      }
+    }
+
+    function calcularPosicao(alerta) {
+      // Simula cálculo de posição baseado no preço
+      // Em produção, isso viria do backend com todos os preços
+      const diferenca = alerta.meu_preco - alerta.melhor_preco;
+      const percentual = alerta.percentual;
+
+      // Estimativa: a cada 10% de diferença = 1 posição pior
+      const posicao = Math.ceil(percentual / 10) + 1;
+      return posicao;
+    }
+
+    function renderizarAlertas() {
+      const container = document.getElementById('alertasContainer');
+
+      let alertasFiltrados = alertasData.filter(a => !a.visualizado);
+
+      // Filtrar por loja
+      if (lojaFiltro !== 'todas') {
+        const lojaNome = lojaFiltro === 'centro' ? 'Centro' : 'Itaipu';
+        alertasFiltrados = alertasFiltrados.filter(a =>
+          a.minhas_lojas.includes(lojaNome)
+        );
+      }
+
+      if (alertasFiltrados.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">✓</div>
+            <div style="font-size: 16px; font-weight: 600;">
+              Nenhum alerta pendente
+            </div>
+            <div style="font-size: 14px; color: #999; margin-top: 8px;">
+              ${lojaFiltro === 'todas' ?
+                'Seus preços estão competitivos!' :
+                'Esta loja está com preços competitivos!'}
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = alertasFiltrados.map(alerta => {
+        const posicao = calcularPosicao(alerta);
+        const ordinal = posicao === 1 ? '1º' : posicao === 2 ? '2º' : posicao === 3 ? '3º' : `${posicao}º`;
+
+        return `
+          <div class="alert-item" data-id="${alerta.id}">
+            <div class="alert-header">
+              <div class="alert-title">
+                ${alerta.nome_produto}
+                <span class="ranking-badge">${ordinal} melhor preço</span>
+              </div>
+              <div class="alert-badge">-${alerta.percentual.toFixed(1)}%</div>
+            </div>
+
+            <div class="alert-details">
+              <div class="detail">
+                <div class="detail-label">Seu Preço</div>
+                <div class="detail-value">R$ ${alerta.meu_preco.toFixed(2)}</div>
+              </div>
+              <div class="detail">
+                <div class="detail-label">Melhor Preço</div>
+                <div class="detail-value">R$ ${alerta.melhor_preco.toFixed(2)}</div>
+              </div>
+              <div class="detail">
+                <div class="detail-label">Precisa Baixar</div>
+                <div class="detail-value" style="color: #d32f2f;">R$ ${alerta.diferenca.toFixed(2)}</div>
+              </div>
+              <div class="detail">
+                <div class="detail-label">Data</div>
+                <div class="detail-value" style="font-size: 13px;">${formatarData(alerta.data_alerta)}</div>
+              </div>
+            </div>
+
+            <div class="alert-footer">
+              <div class="alert-store">${alerta.minhas_lojas}</div>
+              <a href="${BASE_URL}/produtos/p${alerta.produto_id}" target="_blank" class="alert-link">
+                Ver no BoaDica
+              </a>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function filtrarPorLoja(loja) {
+      lojaFiltro = loja;
+
+      // Atualizar botões
+      document.querySelectorAll('.store-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.store === loja);
+      });
+
+      renderizarAlertas();
+    }
+
+    async function executarAnalise() {
+      const btn = document.getElementById('btnExecutar');
+      btn.disabled = true;
+      btn.textContent = 'Executando...';
+
+      try {
+        const res = await fetch('/api/boadica/executar', { method: 'POST' });
+        const resultado = await res.json();
+
+        if (resultado.sucesso) {
+          mostrarToast(
+            `Análise concluída! ${resultado.processados} produtos processados.`,
+            'success'
+          );
+          carregarDados();
+        } else {
+          mostrarToast('Erro na análise', 'error');
+        }
+      } catch (error) {
+        mostrarToast('Erro ao executar análise', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Executar Análise';
+      }
+    }
+
+    function formatarData(dataStr) {
+      const data = new Date(dataStr);
+      return data.toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+
+    function mostrarToast(mensagem, tipo = 'success') {
+      const toast = document.getElementById('toast');
+      toast.textContent = mensagem;
+      toast.className = `toast ${tipo} show`;
+
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 3000);
+    }
+
+    // ========== GERENCIAR PRODUTOS ==========
+
+    let produtosCache = [];
+
+    async function abrirModalProdutos() {
+      document.getElementById('modalProdutos').classList.add('show');
+      await carregarProdutos();
+    }
+
+    function fecharModalProdutos(event) {
+      if (!event || event.target.classList.contains('modal-overlay')) {
+        document.getElementById('modalProdutos').classList.remove('show');
+      }
+    }
+
+    async function carregarProdutos() {
+      const container = document.getElementById('listaProdutos');
+
+      try {
+        const res = await fetch('/api/boadica/produtos');
+        const data = await res.json();
+
+        if (data.success) {
+          produtosCache = data.produtos || [];
+          document.getElementById('totalProdutosModal').textContent = produtosCache.length;
+
+          if (produtosCache.length === 0) {
+            container.innerHTML = `
+              <div class="empty-produtos">
+                <div style="font-size: 48px; margin-bottom: 10px;">📦</div>
+                <div>Nenhum produto cadastrado</div>
+              </div>
+            `;
+            return;
+          }
+
+          container.innerHTML = produtosCache.map((url, index) => `
+            <div class="produto-item">
+              <div class="produto-url">${url}</div>
+              <button class="btn-remove" onclick="removerProdutoPorIndice(${index})">
+                Remover
+              </button>
+            </div>
+          `).join('');
+        }
+      } catch (error) {
+        mostrarToast('Erro ao carregar produtos', 'error');
+      }
+    }
+
+    async function adicionarProduto() {
+      const input = document.getElementById('novoProdutoUrl');
+      const url = input.value.trim();
+
+      if (!url) {
+        mostrarToast('Digite a URL do produto', 'error');
+        return;
+      }
+
+      if (!url.includes('boadica.com.br/produtos/p')) {
+        mostrarToast('URL inválida', 'error');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/boadica/produtos/adicionar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          mostrarToast('Produto adicionado!', 'success');
+          input.value = '';
+          await carregarProdutos();
+          carregarDados();
+        } else {
+          mostrarToast(data.error || 'Erro ao adicionar', 'error');
+        }
+      } catch (error) {
+        mostrarToast('Erro ao adicionar produto', 'error');
+      }
+    }
+
+    async function removerProdutoPorIndice(index) {
+      const url = produtosCache[index];
+
+      if (!confirm(`Remover este produto?\n\n${url}`)) {
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/boadica/produtos/remover', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          mostrarToast('Produto removido!', 'success');
+          await carregarProdutos();
+          carregarDados();
+        } else {
+          mostrarToast('Erro ao remover', 'error');
+        }
+      } catch (error) {
+        mostrarToast('Erro ao remover produto', 'error');
+      }
+    }
+  </script>
+</body>
+</html>
