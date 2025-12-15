@@ -3,10 +3,10 @@
  */
 
 import cron from 'node-cron';
-import { BoadicaScraper } from './boadica-scraper.js';
+import { BoadicaScraperTexto } from './boadica-scraper-texto.js';
 
 export function setupBoadicaRoutes(app, db) {
-  const scraper = new BoadicaScraper(db);
+  const scraper = new BoadicaScraperTexto(db);
 
   // ============ ROTAS API ============
 
