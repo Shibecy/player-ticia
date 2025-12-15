@@ -19,13 +19,19 @@ export function setupBoadicaRoutes(app, db) {
       const stats = db.prepare(`
         SELECT
           (SELECT COUNT(*) FROM boadica_produtos) as total_produtos,
-          (SELECT COUNT(*) FROM boadica_alertas WHERE visualizado = 0) as alertas_pendentes,
+          (SELECT COUNT(DISTINCT produto_id) FROM boadica_alertas WHERE visualizado = 0) as produtos_perdendo,
           (SELECT MAX(ultima_atualizacao) FROM boadica_produtos) as ultima_atualizacao
       `).get();
 
+      // Produtos ganhando = total de produtos - produtos com alertas
+      const produtos_ganhando = stats.total_produtos - stats.produtos_perdendo;
+
       res.json({
         success: true,
-        ...stats
+        total_produtos: stats.total_produtos,
+        produtos_perdendo: stats.produtos_perdendo,
+        produtos_ganhando: produtos_ganhando,
+        ultima_atualizacao: stats.ultima_atualizacao
       });
     } catch (error) {
       res.status(500).json({

@@ -603,7 +603,8 @@
 
         if (status.success) {
           document.getElementById('totalProdutos').textContent = status.total_produtos || 0;
-          document.getElementById('alertasPendentes').textContent = status.alertas_pendentes || 0;
+          document.getElementById('alertasPendentes').textContent = status.produtos_perdendo || 0;
+          document.getElementById('produtosGanhando').textContent = status.produtos_ganhando || 0;
           document.getElementById('ultimaAtualizacao').textContent =
             status.ultima_atualizacao ? formatarData(status.ultima_atualizacao) : 'Nunca';
         }
@@ -615,13 +616,6 @@
         if (alertas.success) {
           alertasData = alertas.alertas;
           renderizarAlertas();
-
-          // Calcular produtos ganhando (total - produtos perdendo)
-          const totalProdutos = status.total_produtos || 0;
-          const produtosPerdendo = status.alertas_pendentes || 0;
-          const produtosGanhando = totalProdutos - produtosPerdendo;
-
-          document.getElementById('produtosGanhando').textContent = produtosGanhando;
         }
       } catch (error) {
         mostrarToast('Erro ao carregar dados', 'error');
