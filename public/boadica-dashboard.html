@@ -330,6 +330,137 @@
         grid-template-columns: 1fr;
       }
     }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.7);
+      z-index: 2000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.show {
+      display: flex;
+    }
+
+    .modal {
+      background: white;
+      border-radius: 15px;
+      padding: 30px;
+      max-width: 800px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 25px;
+      padding-bottom: 15px;
+      border-bottom: 2px solid #eee;
+    }
+
+    .modal-header h2 {
+      color: #333;
+      font-size: 24px;
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 28px;
+      cursor: pointer;
+      color: #999;
+      padding: 0;
+      width: 30px;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-close:hover {
+      color: #333;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      color: #333;
+      font-weight: 600;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 12px 15px;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.3s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .produto-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 15px;
+      border: 2px solid #eee;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      transition: all 0.3s;
+    }
+
+    .produto-item:hover {
+      border-color: #667eea;
+      transform: translateX(5px);
+    }
+
+    .produto-url {
+      flex: 1;
+      color: #333;
+      word-break: break-all;
+      margin-right: 15px;
+    }
+
+    .btn-remove {
+      background: #e74c3c;
+      color: white;
+      border: none;
+      padding: 8px 15px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.3s;
+    }
+
+    .btn-remove:hover {
+      background: #c0392b;
+      transform: scale(1.05);
+    }
+
+    .empty-produtos {
+      text-align: center;
+      padding: 40px 20px;
+      color: #999;
+    }
   </style>
 </head>
 <body>
@@ -364,6 +495,9 @@
     <div class="actions">
       <button class="btn btn-primary" onclick="executarAnalise()" id="btnExecutar">
         🔄 Executar Análise Agora
+      </button>
+      <button class="btn" onclick="abrirModalProdutos()">
+        📝 Gerenciar Produtos
       </button>
       <button class="btn" onclick="carregarDados()">
         📊 Atualizar Dashboard
@@ -400,6 +534,39 @@
 
   <!-- Toast -->
   <div id="toast" class="toast"></div>
+
+  <!-- Modal Gerenciar Produtos -->
+  <div id="modalProdutos" class="modal-overlay" onclick="fecharModalProdutos(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2>📝 Gerenciar Produtos</h2>
+        <button class="modal-close" onclick="fecharModalProdutos()">&times;</button>
+      </div>
+
+      <div class="form-group">
+        <label for="novoProdutoUrl">Adicionar Novo Produto</label>
+        <input
+          type="text"
+          id="novoProdutoUrl"
+          placeholder="https://boadica.com.br/produtos/p123456"
+          onkeypress="if(event.key==='Enter') adicionarProduto()"
+        >
+      </div>
+
+      <button class="btn btn-primary" onclick="adicionarProduto()" style="width: 100%; margin-bottom: 30px;">
+        ➕ Adicionar Produto
+      </button>
+
+      <h3 style="margin-bottom: 15px; color: #333;">Produtos Monitorados (<span id="totalProdutosModal">0</span>)</h3>
+
+      <div id="listaProdutos">
+        <div class="loading">
+          <div class="spinner"></div>
+          <div>Carregando produtos...</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script>
     let alertasData = [];
@@ -595,6 +762,119 @@
     }
 
     const BASE_URL = 'https://boadica.com.br';
+
+    // ========== GERENCIAR PRODUTOS ==========
+
+    async function abrirModalProdutos() {
+      document.getElementById('modalProdutos').classList.add('show');
+      await carregarProdutos();
+    }
+
+    function fecharModalProdutos(event) {
+      if (!event || event.target.classList.contains('modal-overlay')) {
+        document.getElementById('modalProdutos').classList.remove('show');
+      }
+    }
+
+    async function carregarProdutos() {
+      const container = document.getElementById('listaProdutos');
+
+      try {
+        const res = await fetch('/api/boadica/produtos');
+        const data = await res.json();
+
+        if (data.success) {
+          const produtos = data.produtos || [];
+          document.getElementById('totalProdutosModal').textContent = produtos.length;
+
+          if (produtos.length === 0) {
+            container.innerHTML = `
+              <div class="empty-produtos">
+                <div style="font-size: 48px; margin-bottom: 10px;">📦</div>
+                <div>Nenhum produto cadastrado</div>
+                <div style="font-size: 12px; color: #bbb; margin-top: 5px;">
+                  Adicione produtos usando o campo acima
+                </div>
+              </div>
+            `;
+            return;
+          }
+
+          container.innerHTML = produtos.map(url => `
+            <div class="produto-item">
+              <div class="produto-url">${url}</div>
+              <button class="btn-remove" onclick="removerProduto('${url}')">
+                🗑️ Remover
+              </button>
+            </div>
+          `).join('');
+        }
+      } catch (error) {
+        mostrarToast('Erro ao carregar produtos: ' + error.message, 'error');
+      }
+    }
+
+    async function adicionarProduto() {
+      const input = document.getElementById('novoProdutoUrl');
+      const url = input.value.trim();
+
+      if (!url) {
+        mostrarToast('Digite a URL do produto', 'error');
+        return;
+      }
+
+      if (!url.includes('boadica.com.br/produtos/p')) {
+        mostrarToast('URL inválida. Use o formato: https://boadica.com.br/produtos/pXXXXX', 'error');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/boadica/produtos/adicionar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          mostrarToast('Produto adicionado com sucesso!', 'success');
+          input.value = '';
+          await carregarProdutos();
+          carregarDados(); // Atualizar dashboard
+        } else {
+          mostrarToast(data.error || 'Erro ao adicionar produto', 'error');
+        }
+      } catch (error) {
+        mostrarToast('Erro ao adicionar produto: ' + error.message, 'error');
+      }
+    }
+
+    async function removerProduto(url) {
+      if (!confirm(`Tem certeza que deseja remover este produto?\n\n${url}`)) {
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/boadica/produtos/remover', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          mostrarToast('Produto removido com sucesso!', 'success');
+          await carregarProdutos();
+          carregarDados(); // Atualizar dashboard
+        } else {
+          mostrarToast(data.error || 'Erro ao remover produto', 'error');
+        }
+      } catch (error) {
+        mostrarToast('Erro ao remover produto: ' + error.message, 'error');
+      }
+    }
   </script>
 </body>
 </html>
