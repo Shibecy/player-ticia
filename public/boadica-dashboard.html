@@ -765,6 +765,8 @@
 
     // ========== GERENCIAR PRODUTOS ==========
 
+    let produtosCache = [];
+
     async function abrirModalProdutos() {
       document.getElementById('modalProdutos').classList.add('show');
       await carregarProdutos();
@@ -784,10 +786,10 @@
         const data = await res.json();
 
         if (data.success) {
-          const produtos = data.produtos || [];
-          document.getElementById('totalProdutosModal').textContent = produtos.length;
+          produtosCache = data.produtos || [];
+          document.getElementById('totalProdutosModal').textContent = produtosCache.length;
 
-          if (produtos.length === 0) {
+          if (produtosCache.length === 0) {
             container.innerHTML = `
               <div class="empty-produtos">
                 <div style="font-size: 48px; margin-bottom: 10px;">📦</div>
@@ -800,10 +802,10 @@
             return;
           }
 
-          container.innerHTML = produtos.map(url => `
+          container.innerHTML = produtosCache.map((url, index) => `
             <div class="produto-item">
               <div class="produto-url">${url}</div>
-              <button class="btn-remove" onclick="removerProduto('${url}')">
+              <button class="btn-remove" onclick="removerProdutoPorIndice(${index})">
                 🗑️ Remover
               </button>
             </div>
@@ -850,7 +852,9 @@
       }
     }
 
-    async function removerProduto(url) {
+    async function removerProdutoPorIndice(index) {
+      const url = produtosCache[index];
+
       if (!confirm(`Tem certeza que deseja remover este produto?\n\n${url}`)) {
         return;
       }
