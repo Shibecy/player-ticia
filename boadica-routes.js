@@ -179,6 +179,109 @@ export function setupBoadicaRoutes(app, db) {
     }
   });
 
+  /**
+   * GET /api/boadica/produtos
+   * Lista produtos monitorados
+   */
+  app.get('/api/boadica/produtos', async (req, res) => {
+    try {
+      const fs = await import('fs/promises');
+      const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
+      const config = JSON.parse(fileContent);
+
+      res.json({
+        success: true,
+        produtos: config.produtos || []
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
+
+  /**
+   * POST /api/boadica/produtos/adicionar
+   * Adiciona novo produto para monitoramento
+   */
+  app.post('/api/boadica/produtos/adicionar', async (req, res) => {
+    try {
+      const { url } = req.body;
+
+      if (!url || !url.includes('boadica.com.br/produtos/p')) {
+        return res.status(400).json({
+          success: false,
+          error: 'URL inválida. Use o formato: https://boadica.com.br/produtos/pXXXXX'
+        });
+      }
+
+      const fs = await import('fs/promises');
+      let config = { produtos: [] };
+
+      try {
+        const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
+        config = JSON.parse(fileContent);
+      } catch {}
+
+      // Verificar se já existe
+      if (config.produtos.includes(url)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Este produto já está sendo monitorado'
+        });
+      }
+
+      // Adicionar
+      config.produtos.push(url);
+
+      // Salvar
+      await fs.writeFile('./produtos-monitorados.json', JSON.stringify(config, null, 2));
+
+      res.json({
+        success: true,
+        message: 'Produto adicionado com sucesso',
+        total: config.produtos.length
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
+
+  /**
+   * POST /api/boadica/produtos/remover
+   * Remove produto do monitoramento
+   */
+  app.post('/api/boadica/produtos/remover', async (req, res) => {
+    try {
+      const { url } = req.body;
+
+      const fs = await import('fs/promises');
+      const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
+      const config = JSON.parse(fileContent);
+
+      // Remover
+      config.produtos = config.produtos.filter(p => p !== url);
+
+      // Salvar
+      await fs.writeFile('./produtos-monitorados.json', JSON.stringify(config, null, 2));
+
+      res.json({
+        success: true,
+        message: 'Produto removido com sucesso',
+        total: config.produtos.length
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
+
   // ============ JOB AGENDADO ============
 
   /**
