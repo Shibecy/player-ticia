@@ -6,6 +6,7 @@ import fs from 'fs';
 import mime from 'mime';
 import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
+import { setupBoadicaRoutes } from './boadica-routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -728,6 +729,9 @@ app.get('/api/admin/overview_json', (req, res) => {
   }
 });
 
+/* ================== BOADICA MONITORING ================== */
+setupBoadicaRoutes(app, db);
+
 /* ================== START SERVER ================== */
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
@@ -740,6 +744,10 @@ app.listen(PORT, '0.0.0.0', () => {
 ║  🔐 Admin: /admin                      ║
 ║  📊 Overview: /admin/overview          ║
 ║  🎛️  Console: /admin/tracks            ║
+║                                        ║
+║  🎯 BoaDica: /boadica-dashboard.html   ║
+║  📊 API: /api/boadica/*                ║
+║  ⏰ Auto: Todo dia às 8:00             ║
 ║                                        ║
 ║  👤 User: ${process.env.ADMIN_USER || 'admin'}                   ║
 ║  🔑 Pass: ${process.env.ADMIN_PASS || 'changeme'}                ║
