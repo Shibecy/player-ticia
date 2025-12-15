@@ -186,14 +186,23 @@ export function setupBoadicaRoutes(app, db) {
   app.get('/api/boadica/produtos', async (req, res) => {
     try {
       const fs = await import('fs/promises');
-      const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
-      const config = JSON.parse(fileContent);
+      let config = { produtos: [] };
+
+      try {
+        const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
+        config = JSON.parse(fileContent);
+      } catch (readError) {
+        // Se o arquivo não existir, criar
+        console.log('📝 Criando arquivo produtos-monitorados.json...');
+        await fs.writeFile('./produtos-monitorados.json', JSON.stringify(config, null, 2));
+      }
 
       res.json({
         success: true,
         produtos: config.produtos || []
       });
     } catch (error) {
+      console.error('Erro em /api/boadica/produtos:', error);
       res.status(500).json({
         success: false,
         error: error.message
