@@ -311,6 +311,139 @@ export function setupBoadicaRoutes(app, db) {
     }
   });
 
+  /**
+   * POST /api/boadica/custos/salvar
+   * Salva/atualiza custo de um produto
+   */
+  app.post('/api/boadica/custos/salvar', (req, res) => {
+    try {
+      const { produto_id, custo, margem_minima } = req.body;
+
+      if (!produto_id || !custo) {
+        return res.status(400).json({
+          success: false,
+          error: 'produto_id e custo são obrigatórios'
+        });
+      }
+
+      const stmt = db.prepare(`
+        INSERT INTO boadica_custos (produto_id, custo, margem_minima)
+        VALUES (?, ?, ?)
+        ON CONFLICT(produto_id) DO UPDATE SET
+          custo = excluded.custo,
+          margem_minima = excluded.margem_minima,
+          data_atualizacao = datetime('now', 'localtime')
+      `);
+
+      stmt.run(produto_id, parseFloat(custo), margem_minima || 15.0);
+
+      res.json({
+        success: true,
+        message: 'Custo salvo com sucesso'
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
+
+  /**
+   * GET /api/boadica/custos/:produto_id
+   * Busca custo de um produto
+   */
+  app.get('/api/boadica/custos/:produto_id', (req, res) => {
+    try {
+      const { produto_id } = req.params;
+
+      const custo = db.prepare(`
+        SELECT * FROM boadica_custos
+        WHERE produto_id = ?
+      `).get(produto_id);
+
+      res.json({
+        success: true,
+        custo: custo || null
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
+
+  /**
+   * POST /api/boadica/preco-sugerido
+   * Calcula preço sugerido baseado no custo e concorrência
+   */
+  app.post('/api/boadica/preco-sugerido', (req, res) => {
+    try {
+      const { produto_id, custo } = req.body;
+
+      if (!produto_id || !custo) {
+        return res.status(400).json({
+          success: false,
+          error: 'produto_id e custo são obrigatórios'
+        });
+      }
+
+      const custoNum = parseFloat(custo);
+      const margemMinima = 15.0;
+
+      // Preço mínimo com 15% de margem
+      const precoMinimo = custoNum * (1 + margemMinima / 100);
+
+      // Buscar melhor preço do mercado
+      const melhorPrecoMercado = db.prepare(`
+        SELECT MIN(preco) as melhor_preco
+        FROM boadica_precos
+        WHERE produto_id = ?
+          AND eh_minha_loja = 0
+          AND datetime(data_captura) > datetime('now', '-7 days')
+      `).get(produto_id);
+
+      let precoSugerido = precoMinimo;
+      let estrategia = 'margem_minima';
+      let aviso = null;
+
+      if (melhorPrecoMercado && melhorPrecoMercado.melhor_preco) {
+        const melhorPreco = melhorPrecoMercado.melhor_preco;
+
+        // Se o melhor preço do mercado é maior que nosso mínimo, podemos competir
+        if (melhorPreco > precoMinimo) {
+          // Sugerir 1% abaixo do melhor preço, mas respeitando margem mínima
+          precoSugerido = Math.max(melhorPreco * 0.99, precoMinimo);
+          estrategia = 'competitivo';
+        } else {
+          // Mercado está abaixo da nossa margem mínima
+          aviso = `Melhor preço do mercado (R$ ${melhorPreco.toFixed(2)}) está abaixo da margem mínima de 15%`;
+          precoSugerido = precoMinimo;
+          estrategia = 'inviavel';
+        }
+      }
+
+      const margemFinal = ((precoSugerido - custoNum) / custoNum) * 100;
+
+      res.json({
+        success: true,
+        custo: custoNum,
+        preco_minimo: parseFloat(precoMinimo.toFixed(2)),
+        preco_sugerido: parseFloat(precoSugerido.toFixed(2)),
+        melhor_preco_mercado: melhorPrecoMercado?.melhor_preco || null,
+        margem_final: parseFloat(margemFinal.toFixed(2)),
+        estrategia,
+        aviso
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
+
   // ============ JOB AGENDADO ============
 
   /**

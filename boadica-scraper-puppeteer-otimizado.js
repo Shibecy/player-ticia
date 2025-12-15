@@ -56,6 +56,15 @@ export class BoadicaScraperPuppeteerOtimizado {
         data_alerta TEXT DEFAULT (datetime('now', 'localtime')),
         visualizado INTEGER DEFAULT 0
       );
+
+      CREATE TABLE IF NOT EXISTS boadica_custos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        produto_id TEXT NOT NULL UNIQUE,
+        custo REAL NOT NULL,
+        margem_minima REAL DEFAULT 15.0,
+        data_atualizacao TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (produto_id) REFERENCES boadica_produtos(produto_id)
+      );
     `);
 
     console.log('✓ Tabelas do BoaDica criadas no banco de dados');
