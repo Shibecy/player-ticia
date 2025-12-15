@@ -92,31 +92,25 @@ export class BoadicaScraper {
   }
 
   /**
-   * Busca lista de produtos
+   * Busca lista de produtos do arquivo produtos-monitorados.json
    */
   async obterListaProdutos() {
-    console.log('🔍 Buscando lista de produtos...');
+    console.log('🔍 Carregando lista de produtos monitorados...');
 
-    const html = await this.fetchPage(`${BASE_URL}/produtos`);
-    if (!html) return [];
+    try {
+      const fs = await import('fs/promises');
+      const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
+      const config = JSON.parse(fileContent);
 
-    const dom = new JSDOM(html);
-    const document = dom.window.document;
+      const produtos = config.produtos || [];
+      console.log(`✓ ${produtos.length} produtos configurados para monitoramento`);
 
-    // Tentar diferentes seletores
-    const links = [
-      ...document.querySelectorAll('a[href*="/produtos/p"]'),
-      ...document.querySelectorAll('a[href*="/produto/"]')
-    ];
-
-    const produtos = [...new Set(
-      links
-        .map(link => link.href)
-        .filter(href => href && href.includes('/p'))
-    )];
-
-    console.log(`✓ Encontrados ${produtos.length} produtos`);
-    return produtos;
+      return produtos;
+    } catch (error) {
+      console.error('⚠️  Erro ao ler produtos-monitorados.json:', error.message);
+      console.log('💡 Crie o arquivo produtos-monitorados.json com seus produtos');
+      return [];
+    }
   }
 
   /**
