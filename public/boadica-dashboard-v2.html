@@ -512,8 +512,8 @@
         <div class="value" id="alertasPendentes">-</div>
       </div>
       <div class="stat-card">
-        <div class="label">Precisa Baixar (Total)</div>
-        <div class="value" id="precisaBaixar" style="font-size: 20px;">-</div>
+        <div class="label">Produtos Ganhando</div>
+        <div class="value" id="produtosGanhando">-</div>
       </div>
       <div class="stat-card">
         <div class="label">Última Atualização</div>
@@ -616,13 +616,12 @@
           alertasData = alertas.alertas;
           renderizarAlertas();
 
-          // Calcular total a baixar
-          const totalBaixar = alertasData
-            .filter(a => !a.visualizado)
-            .reduce((sum, a) => sum + a.diferenca, 0);
+          // Calcular produtos ganhando (total - produtos perdendo)
+          const totalProdutos = status.total_produtos || 0;
+          const produtosPerdendo = status.alertas_pendentes || 0;
+          const produtosGanhando = totalProdutos - produtosPerdendo;
 
-          document.getElementById('precisaBaixar').textContent =
-            `R$ ${totalBaixar.toFixed(2)}`;
+          document.getElementById('produtosGanhando').textContent = produtosGanhando;
         }
       } catch (error) {
         mostrarToast('Erro ao carregar dados', 'error');
