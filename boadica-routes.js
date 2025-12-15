@@ -231,7 +231,11 @@ export function setupBoadicaRoutes(app, db) {
       try {
         const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
         config = JSON.parse(fileContent);
-      } catch {}
+      } catch (readError) {
+        // Se o arquivo não existir, criar
+        console.log('📝 Criando arquivo produtos-monitorados.json...');
+        await fs.writeFile('./produtos-monitorados.json', JSON.stringify(config, null, 2));
+      }
 
       // Verificar se já existe
       if (config.produtos.includes(url)) {
@@ -269,8 +273,18 @@ export function setupBoadicaRoutes(app, db) {
       const { url } = req.body;
 
       const fs = await import('fs/promises');
-      const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
-      const config = JSON.parse(fileContent);
+      let config = { produtos: [] };
+
+      try {
+        const fileContent = await fs.readFile('./produtos-monitorados.json', 'utf-8');
+        config = JSON.parse(fileContent);
+      } catch (readError) {
+        // Se o arquivo não existir, retornar erro
+        return res.status(404).json({
+          success: false,
+          error: 'Arquivo de produtos não encontrado'
+        });
+      }
 
       // Remover
       config.produtos = config.produtos.filter(p => p !== url);
