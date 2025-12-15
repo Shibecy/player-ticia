@@ -14,5 +14,6 @@ services:
       - ./music:/usr/src/app/music
       - ./data:/usr/src/app/data
       - ./public:/usr/src/app/public
+      - ./produtos-monitorados.json:/usr/src/app/produtos-monitorados.json
     restart: always
 

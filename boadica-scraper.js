@@ -120,7 +120,13 @@ export class BoadicaScraper {
     const html = await this.fetchPage(url);
     if (!html) return null;
 
-    const dom = new JSDOM(html);
+    const dom = new JSDOM(html, {
+      // Desabilitar CSS parsing para evitar erros
+      features: {
+        FetchExternalResources: false,
+        ProcessExternalResources: false
+      }
+    });
     const document = dom.window.document;
 
     const produtoInfo = {
