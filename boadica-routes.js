@@ -428,11 +428,22 @@ export function setupBoadicaRoutes(app, db) {
       if (melhorPrecoMercado && melhorPrecoMercado.melhor_preco) {
         const melhorPreco = melhorPrecoMercado.melhor_preco;
 
+        // NOVA ESTRATÉGIA: R$ 0,05 abaixo do concorrente (se mantiver margem)
+        const precoParaGanhar = melhorPreco - 0.05;
+
         // Se o melhor preço do mercado é maior que nosso mínimo, podemos competir
         if (melhorPreco > precoMinimo) {
-          // Sugerir 1% abaixo do melhor preço, mas respeitando margem mínima
-          precoSugerido = Math.max(melhorPreco * 0.99, precoMinimo);
-          estrategia = 'competitivo';
+          // Verificar se conseguimos ganhar com apenas R$ 0,05 abaixo
+          if (precoParaGanhar >= precoMinimo) {
+            // Ótimo! Ganhamos com R$ 0,05 abaixo e mantemos margem
+            precoSugerido = precoParaGanhar;
+            estrategia = 'competitivo_otimo';
+          } else {
+            // Precisamos baixar mais para manter a margem
+            precoSugerido = precoMinimo;
+            estrategia = 'margem_minima';
+            aviso = `Para ganhar do concorrente (R$ ${melhorPreco.toFixed(2)}) mantendo 15% de margem, use o preço mínimo`;
+          }
         } else {
           // Mercado está abaixo da nossa margem mínima
           aviso = `Melhor preço do mercado (R$ ${melhorPreco.toFixed(2)}) está abaixo da margem mínima de 15%`;

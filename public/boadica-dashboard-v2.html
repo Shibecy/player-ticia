@@ -1101,7 +1101,8 @@
           <div class="resultado-item">
             <span class="resultado-label">Estratégia</span>
             <span class="resultado-value">
-              ${data.estrategia === 'competitivo' ? '🎯 Competitivo' :
+              ${data.estrategia === 'competitivo_otimo' ? '🎯 Ótimo! R$ 0,05 abaixo' :
+                data.estrategia === 'competitivo' ? '🎯 Competitivo' :
                 data.estrategia === 'inviavel' ? '⚠️ Inviável' :
                 '📌 Margem Mínima'}
             </span>
