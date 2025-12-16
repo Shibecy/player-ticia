@@ -19,18 +19,35 @@ export function setupBoadicaRoutes(app, db) {
       const stats = db.prepare(`
         SELECT
           (SELECT COUNT(*) FROM boadica_produtos) as total_produtos,
-          (SELECT COUNT(DISTINCT produto_id) FROM boadica_alertas WHERE visualizado = 0) as produtos_perdendo,
           (SELECT MAX(ultima_atualizacao) FROM boadica_produtos) as ultima_atualizacao
       `).get();
 
-      // Produtos ganhando = total de produtos - produtos com alertas
-      const produtos_ganhando = stats.total_produtos - stats.produtos_perdendo;
+      // Contar produtos por status na última análise
+      const statusCounts = db.prepare(`
+        SELECT
+          status,
+          COUNT(DISTINCT produto_id) as total
+        FROM boadica_status_produtos
+        WHERE datetime(data_analise) > datetime('now', '-1 day')
+        GROUP BY status
+      `).all();
+
+      let produtos_perdendo = 0;
+      let produtos_ganhando = 0;
+      let produtos_empatando = 0;
+
+      statusCounts.forEach(row => {
+        if (row.status === 'perdendo') produtos_perdendo = row.total;
+        if (row.status === 'ganhando') produtos_ganhando = row.total;
+        if (row.status === 'empatando') produtos_empatando = row.total;
+      });
 
       res.json({
         success: true,
         total_produtos: stats.total_produtos,
-        produtos_perdendo: stats.produtos_perdendo,
-        produtos_ganhando: produtos_ganhando,
+        produtos_perdendo,
+        produtos_ganhando,
+        produtos_empatando,
         ultima_atualizacao: stats.ultima_atualizacao
       });
     } catch (error) {

@@ -65,6 +65,14 @@ export class BoadicaScraperPuppeteerOtimizado {
         data_atualizacao TEXT DEFAULT (datetime('now', 'localtime')),
         FOREIGN KEY (produto_id) REFERENCES boadica_produtos(produto_id)
       );
+
+      CREATE TABLE IF NOT EXISTS boadica_status_produtos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        produto_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        data_analise TEXT DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (produto_id) REFERENCES boadica_produtos(produto_id)
+      );
     `);
 
     console.log('✓ Tabelas do BoaDica criadas no banco de dados');
@@ -330,12 +338,24 @@ export class BoadicaScraperPuppeteerOtimizado {
    */
   analisarCompetitividade(produto) {
     const minhasOfertas = produto.lojas.filter(o => o.ehMinhaLoja);
-    if (minhasOfertas.length === 0) return;
+
+    // Salvar status do produto
+    const statusStmt = this.db.prepare(`
+      INSERT INTO boadica_status_produtos (produto_id, status)
+      VALUES (?, ?)
+    `);
+
+    if (minhasOfertas.length === 0) {
+      // Sem minhas lojas neste produto
+      statusStmt.run(produto.produtoId, 'sem_oferta');
+      return;
+    }
 
     const meuMelhorPreco = Math.min(...minhasOfertas.map(o => o.preco_numerico));
     const melhorPreco = Math.min(...produto.lojas.map(o => o.preco_numerico));
 
     if (meuMelhorPreco > melhorPreco) {
+      // Perdendo - criar alerta
       const diferenca = meuMelhorPreco - melhorPreco;
       const percentual = (diferenca / melhorPreco) * 100;
 
@@ -353,6 +373,14 @@ export class BoadicaScraperPuppeteerOtimizado {
         percentual,
         minhasOfertas.map(o => o.nome).join(', ')
       );
+
+      statusStmt.run(produto.produtoId, 'perdendo');
+    } else if (meuMelhorPreco === melhorPreco) {
+      // Empatando
+      statusStmt.run(produto.produtoId, 'empatando');
+    } else {
+      // Ganhando
+      statusStmt.run(produto.produtoId, 'ganhando');
     }
   }
 
