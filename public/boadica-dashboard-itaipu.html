@@ -550,21 +550,15 @@
   <div class="container">
     <!-- Header -->
     <div class="header">
-      <h1>Monitoramento de Preços</h1>
-      <p>TI e CIA - Sistema Interno</p>
-    </div>
-
-    <!-- Filtro de Lojas -->
-    <div class="store-filter">
-      <button class="store-btn active" onclick="filtrarPorLoja('todas')" data-store="todas">
-        Todas as Lojas
-      </button>
-      <button class="store-btn" onclick="filtrarPorLoja('centro')" data-store="centro">
-        TI e CIA Centro
-      </button>
-      <button class="store-btn" onclick="filtrarPorLoja('itaipu')" data-store="itaipu">
-        TI e CIA Itaipu
-      </button>
+      <h1>Monitoramento de Preços - TI e CIA Itaipu</h1>
+      <p>
+        <a href="/public/boadica-dashboard-centro.html" style="color: #00bcd4; text-decoration: none; margin-right: 15px;">
+          → Ver Loja Centro
+        </a>
+        <a href="/public/boadica-dashboard-v2.html" style="color: #00bcd4; text-decoration: none;">
+          → Ver Todas as Lojas
+        </a>
+      </p>
     </div>
 
     <!-- Stats -->
@@ -683,7 +677,7 @@
 
   <script>
     let alertasData = [];
-    let lojaFiltro = 'todas';
+    let lojaFiltro = 'itaipu'; // FIXO para Itaipu
     const BASE_URL = 'https://boadica.com.br';
     let produtoAtualCalc = null;
 
